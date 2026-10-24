@@ -55,6 +55,7 @@ class TestManifestColumns(unittest.TestCase):
                 "original_url", "requested_timestamp", "timestamp", "wayback_url", "status",
                 "sha256", "saved_path", "kind", "found_via", "source", "mimetype",
                 "cdx_digest", "bytes", "content_encoding", "error", "fetched_at",
+                "memento_datetime",
             ],
         )
 

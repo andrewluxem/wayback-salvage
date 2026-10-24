@@ -528,8 +528,9 @@ class Client:
 
     def request(self, url: str, live: bool = False, validate=None) -> Response:
         """One request with retries. Live requests are not retried. From
-        archive.org, the outage page counts as a 503 whatever its status,
-        and validate(resp) may return another reason to retry like one."""
+        archive.org, the outage page (see is_outage) counts as a 503
+        whatever its status, and validate(resp) may return another reason
+        to retry like one."""
         host = (urllib.parse.urlsplit(url).hostname or "").lower()
         limiter = self._limiter_for(host)
         attempt = 0
@@ -562,7 +563,7 @@ class Client:
                 self._record(url, resp)
                 problem = None
                 if not live and is_archive_host(host):
-                    if is_offline_page(resp):
+                    if is_outage(url, resp):
                         problem = "archive.org Temporarily Offline page (HTTP %d)" % resp.status
                     elif validate is not None:
                         problem = validate(resp)
@@ -751,6 +752,18 @@ OFFLINE_SCAN_BYTES = 65536
 def is_offline_page(resp) -> bool:
     dec = decode_body(resp.body, resp.header("content-encoding"), sniff=True)
     return bool(_OFFLINE_TITLE_RE.search(dec.data[:OFFLINE_SCAN_BYTES]))
+
+
+def is_outage(url: str, resp) -> bool:
+    """archive.org's outage page in place of the response to url. A real
+    replay (/web/) carries Memento-Datetime, so a replay that has one is
+    an archived page, whatever its title. CDX and other archive.org
+    responses go by the title alone."""
+    if not is_offline_page(resp):
+        return False
+    if parse_wayback_url(url) is None:
+        return True
+    return not (resp.header("memento-datetime") or "").strip()
 
 
 _HEIF_BRANDS = (b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1")
@@ -1403,6 +1416,7 @@ MANIFEST_COLUMNS = [
     "original_url", "requested_timestamp", "timestamp", "wayback_url", "status",
     "sha256", "saved_path", "kind", "found_via", "source", "mimetype",
     "cdx_digest", "bytes", "content_encoding", "error", "fetched_at",
+    "memento_datetime",
 ]
 # Rows in these states are final: a rerun skips them.
 RESUME_SKIP = frozenset(("ok", "duplicate", "not-archived", "type-mismatch", "inline-data"))
@@ -1422,10 +1436,13 @@ class Manifest:
         self._fh = None
         self._writer = None
         self._dirty = False
+        self._old_header = False
         if os.path.exists(self.path):
             with open(self.path, newline="", encoding="utf-8") as fh:
-                for row in csv.DictReader(fh):
+                reader = csv.DictReader(fh)
+                for row in reader:
                     self._index(self._clean(row))
+                self._old_header = reader.fieldnames is not None and reader.fieldnames != MANIFEST_COLUMNS
 
     @staticmethod
     def _clean(row: dict) -> dict:
@@ -1446,6 +1463,11 @@ class Manifest:
     def append(self, row: dict) -> dict:
         row = self._clean(row)
         if self._fh is None:
+            if self._old_header:
+                # Written by an older version with other columns: rewrite
+                # it first so appended rows line up with the header.
+                self._rewrite()
+                self._old_header = False
             os.makedirs(self.out_dir, exist_ok=True)
             size = os.path.getsize(self.path) if os.path.exists(self.path) else 0
             self._fh = open(self.path, "a", newline="", encoding="utf-8")
@@ -1473,6 +1495,10 @@ class Manifest:
         self.close()
         if not self._dirty and not os.path.exists(self.path):
             return
+        self._rewrite()
+
+    def _rewrite(self) -> None:
+        """Replace the file atomically with one row per key."""
         tmp = self.path + ".tmp"
         with open(tmp, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=MANIFEST_COLUMNS, lineterminator="\n")
@@ -1664,6 +1690,7 @@ class PageResult:
         self.wayback_url = ""
         self.requested_timestamp = ""
         self.timestamp = ""
+        self.memento_datetime = ""
         self.latest_path = None
         self.http_status = 0
         self.status = "error"
@@ -1703,6 +1730,7 @@ class PageResult:
             "wayback_url": self.wayback_url,
             "requested_timestamp": self.requested_timestamp,
             "timestamp": self.timestamp,
+            "memento_datetime": self.memento_datetime,
             "latest_path": self.latest_path,
             "http_status": self.http_status,
             "status": self.status,
@@ -1770,6 +1798,7 @@ def analyse_page(run: Run, user_url: str, timestamp=None, latest: bool = False) 
     pr.base_url = normalize_url(original)
     pr.http_status = resp.status
     pr.content_type = resp.header("content-type") or ""
+    pr.memento_datetime = resp.header("memento-datetime") or ""
     pr.raw_bytes = len(resp.body)
     if fetched.too_many_redirects:
         pr.error = "more than %d redirects" % MAX_HOPS
@@ -1799,6 +1828,7 @@ def _decode_page(run: Run, pr: PageResult, resp: Response, original: str) -> Non
                 dec.flags.append("rewrite-mode")
                 pr.wayback_url = retry.final_url
                 pr.content_type = r2.header("content-type") or pr.content_type
+                pr.memento_datetime = r2.header("memento-datetime") or ""
                 pr.raw_bytes = len(r2.body)
         if dec.status == "encoding-unsupported":
             pr.status = "encoding-unsupported"
@@ -1847,6 +1877,7 @@ def _save_page(run: Run, pr: PageResult) -> None:
         "bytes": pr.decoded_bytes if pr.decoded is not None else pr.raw_bytes,
         "content_encoding": pr.content_encoding,
         "error": "; ".join(x for x in (pr.error, ",".join(pr.flags)) if x),
+        "memento_datetime": pr.memento_datetime,
     })
 
 
@@ -1907,6 +1938,7 @@ def _image_row(run: Run, item: Item, base: dict, fetched: Fetched, source: str) 
         "timestamp": parsed[0] if parsed else "",
         "source": source,
         "mimetype": resp.media_type() or base.get("mimetype", ""),
+        "memento_datetime": resp.header("memento-datetime") or "",
     })
     if fetched.too_many_redirects:
         row.update(status="error", error="more than %d redirects" % MAX_HOPS)
@@ -2150,10 +2182,10 @@ def _print_page(run: Run, pr: PageResult) -> None:
     if run.args.json:
         run.emit_json(d)
         return
-    for k in ("url", "base_url", "wayback_url", "requested_timestamp", "timestamp", "latest_path",
-              "http_status", "status", "content_type", "content_encoding", "raw_bytes", "decoded_bytes",
-              "charset", "flags", "toolbar_injected", "js_rendered", "js_reasons", "content_images",
-              "saved_path", "error"):
+    for k in ("url", "base_url", "wayback_url", "requested_timestamp", "timestamp", "memento_datetime",
+              "latest_path", "http_status", "status", "content_type", "content_encoding", "raw_bytes",
+              "decoded_bytes", "charset", "flags", "toolbar_injected", "js_rendered", "js_reasons",
+              "content_images", "saved_path", "error"):
         if k == "latest_path" and d[k] is None:
             continue
         run.say("%s=%s" % (k, _fmt(d[k])))

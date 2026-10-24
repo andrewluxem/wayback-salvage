@@ -80,6 +80,7 @@ Shared options:
 | `content_encoding` | `Content-Encoding` the body arrived with: `identity` when absent, `sniffed-gzip` when an HTML body was gzip without a header. |
 | `error` | Detail for failed rows, plus page flags such as `rewrite-mode`. |
 | `fetched_at` | When the row was written. |
+| `memento_datetime` | `Memento-Datetime` header of the final response, as sent (`Mon, 16 Sep 2024 02:53:21 GMT`); blank when it had none or nothing was fetched. A manifest from 0.2.0 or earlier gains the column the first time a run writes to it. |
 
 Status values:
 
@@ -167,7 +168,7 @@ urllib sends no `Accept-Encoding` and decodes nothing, and Wayback replays `id_`
 - On 429, 502, 503, 504 and connection resets: wait `max(Retry-After, 30 * 2**attempt)` seconds plus jitter, capped at 600 s, for up to `--max-retries` (default 4) retries. `Retry-After` is accepted as seconds or an HTTP date.
 - After any 429 the steady delay doubles for the rest of the run, capped at 60 s.
 - When retries run out the run stops, flushes the manifest and exits 3.
-- From archive.org, a response whose `<title>` contains "Temporarily Offline" is handled as a 503 whatever its status code, and a 200 CDX body that is not JSON is retried the same way (an empty body still means no captures). Neither becomes `not-archived` or `type-mismatch`, so a rerun after the outage picks the rows up again.
+- From archive.org, a response whose `<title>` contains "Temporarily Offline" is handled as a 503 whatever its status code. On a replay (`/web/...`) that holds only when the `Memento-Datetime` header is absent: every real replay carries one, so a replay with it is an archived page that happens to have that title. CDX responses go by the title alone. A 200 CDX body that is not JSON is retried the same way (an empty body still means no captures). Neither becomes `not-archived` or `type-mismatch`, so a rerun after the outage picks the rows up again.
 - `--max-requests` (default 300) counts every HTTP request, redirect hops and `--follow-css` fetches included. At the cap, remaining items get `skipped-cap` and the run exits 2.
 - The availability API is never used; CDX covers it.
 - An image's nearest capture comes from requesting `/web/<page_ts>id_/<image_url>` and following Wayback's redirect. A per-image CDX lookup happens only after a 404.
@@ -190,7 +191,7 @@ The suite is offline. A module-level guard makes any socket connection fail, and
 
 - Single-threaded by design. A full 300-request run at the default pace takes more than half an hour.
 - JS-rendered sites such as Google Sites may yield only icons: images loaded by JavaScript are found only if their URLs appear in inline script strings or in the domain's CDX listing (within its date window). The host report says where to look next.
-- An archived page whose own `<title>` contains "Temporarily Offline" cannot be told apart from archive.org's outage page. It is retried until the run exits 3.
+- An archived page whose own `<title>` contains "Temporarily Offline" is told apart from archive.org's outage page only by its `Memento-Datetime` header. The outage page's real headers have not been observed: if it ever carried that header, it would be kept as a page or recorded as `type-mismatch` instead of retried.
 
 ## License
 
