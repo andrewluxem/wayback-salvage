@@ -2,7 +2,8 @@
 
 Each fixture is two files: <name>.meta.json (status and headers) and
 <name>.body (raw response bytes, exactly as a server would send them).
-Output is deterministic (gzip mtime=0, fixed inputs). The bodies are
+Output is deterministic and identical across Python versions (gzip
+mtime=0 with a pinned header, fixed inputs). The bodies are
 committed, so tests never depend on running this script; rerun it only
 when changing a fixture:
 
@@ -59,6 +60,15 @@ def png(width: int, height: int, rgb: tuple) -> bytes:
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
+
+
+def gz(data: bytes) -> bytes:
+    """gzip.compress(mtime=0) with the XFL header byte pinned to 2. Python
+    3.9 writes 2 and newer versions write 0; the deflate stream is the
+    same, so pinning it makes the output identical across versions."""
+    out = bytearray(gzip.compress(data, mtime=0))
+    out[8] = 2
+    return bytes(out)
 
 
 def raw_deflate(data: bytes) -> bytes:
@@ -266,9 +276,9 @@ def fixtures() -> dict:
         "page_gzip": (
             200,
             {"Content-Type": HTML_UTF8, "Content-Encoding": "gzip"},
-            gzip.compress(SIMPLE_HTML, mtime=0),
+            gz(SIMPLE_HTML),
         ),
-        "page_gzip_noheader": (200, html_meta, gzip.compress(SIMPLE_HTML, mtime=0)),
+        "page_gzip_noheader": (200, html_meta, gz(SIMPLE_HTML)),
         "page_bad_gzip": (200, {"Content-Type": HTML_UTF8, "Content-Encoding": "gzip"}, SIMPLE_HTML),
         "page_plain": (200, html_meta, SIMPLE_HTML),
         # Case 4: deflate and br.
@@ -287,7 +297,7 @@ def fixtures() -> dict:
         "page_gsites": (
             200,
             {"Content-Type": HTML_UTF8, "Content-Encoding": "gzip"},
-            gzip.compress(GSITES_HTML, mtime=0),
+            gz(GSITES_HTML),
         ),
         # Case 6: classic page.
         "page_classic": (200, html_meta, CLASSIC_HTML),
