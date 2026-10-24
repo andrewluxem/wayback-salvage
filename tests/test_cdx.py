@@ -169,6 +169,17 @@ class TestCdxListingPagination(unittest.TestCase):
         self.assertEqual(t.count(wb("20210101000000", "https://example.com/logo.png")), 0)
         self.assertEqual(t.unrouted, [])
 
+    def test_dry_run_plans_one_row_per_digest(self):
+        # No ok rows exist in a dry run, so this pins the client-side
+        # digest dedupe of the listing itself.
+        t = self._transport()
+        with tempfile.TemporaryDirectory() as out:
+            code, _, stderr = run_cli(["site-images", "example.com", "--dry-run", "-o", out, "--quiet"], t)
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+            planned = [r for r in read_manifest(out) if r["status"] == "planned"]
+        self.assertEqual(sorted(r["cdx_digest"] for r in planned), ["DIGESTBANNER", "DIGESTHERO", "DIGESTLOGO"])
+        self.assertFalse(any(not is_cdx(u) for u in t.calls))
+
     def test_loose_mime_filter(self):
         t = self._transport()
         with tempfile.TemporaryDirectory() as out:

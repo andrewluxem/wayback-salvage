@@ -1173,3 +1173,1258 @@ def host_report(ex: Extraction, page_host: str) -> list:
             continue
         counts[host] += 1
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+# ------------------------------------------------------ files and naming
+
+SEGMENT_MAX = 120
+_UNSAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._~+=,@-]")
+
+
+def _short_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+
+
+def _split_ext(name: str) -> tuple:
+    stem, dot, ext = name.rpartition(".")
+    if dot and stem and 1 <= len(ext) <= 5 and ext.isalnum():
+        return stem, "." + ext
+    return name, ""
+
+
+def _cap_segment(seg: str) -> str:
+    if len(seg) <= SEGMENT_MAX:
+        return seg
+    stem, ext = _split_ext(seg)
+    return stem[: SEGMENT_MAX - len(ext) - 9] + "-" + _short_hash(seg) + ext
+
+
+def _safe_segment(seg: str) -> str:
+    """Percent-decode, replace anything unusual, neutralise . and .."""
+    seg = _UNSAFE_SEGMENT_RE.sub("_", urllib.parse.unquote(seg))
+    if seg in (".", ".."):
+        seg = "_" * len(seg)
+    return seg
+
+
+def _host_segment(parts) -> str:
+    host = (parts.hostname or "").lower() or "unknown-host"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if port:
+        host += "_%d" % port
+    return _cap_segment(_safe_segment(host))
+
+
+def _url_name_parts(url: str) -> tuple:
+    parts = urllib.parse.urlsplit(url)
+    segs = [_safe_segment(s) for s in parts.path.split("/") if s]
+    name = "index" if not segs or parts.path.endswith("/") else segs.pop()
+    return parts, [_cap_segment(s) for s in segs], name
+
+
+def image_relpath(url: str, sniffed_ext=None) -> str:
+    """images/<host>/<path>; query becomes a short hash suffix; the
+    extension comes from the sniff when the URL has none."""
+    parts, dirs, name = _url_name_parts(url)
+    stem, ext = _split_ext(name)
+    if not ext and sniffed_ext:
+        ext = "." + sniffed_ext
+    if parts.query:
+        stem += "__" + _short_hash(parts.query)
+    return "/".join(["images", _host_segment(parts)] + dirs + [_cap_segment(stem + ext)])
+
+
+def page_relpath(ts: str, url: str) -> str:
+    """pages/<ts>/<host>/<path>.html"""
+    parts, dirs, name = _url_name_parts(url)
+    stem, ext = _split_ext(name)
+    if ext.lower() not in (".html", ".htm"):
+        stem, ext = name, ".html"
+    if parts.query:
+        stem += "__" + _short_hash(parts.query)
+    return "/".join(["pages", _safe_segment(ts), _host_segment(parts)] + dirs + [_cap_segment(stem + ext)])
+
+
+def resolve_inside(out_dir: str, relpath: str) -> str:
+    """Absolute path for relpath, asserted to be inside out_dir."""
+    if not relpath or os.path.isabs(relpath) or relpath.startswith(("/", "\\")):
+        raise ValueError("unsafe output path: %r" % relpath)
+    root = os.path.realpath(out_dir)
+    full = os.path.realpath(os.path.join(root, *relpath.split("/")))
+    if not full.startswith(root + os.sep):
+        raise ValueError("output path escapes --out: %r" % relpath)
+    return full
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 16), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def write_atomic(path: str, data: bytes) -> None:
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(tmp, 0o666 & ~mask)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _with_suffix(relpath: str, suffix: str) -> str:
+    head, _, name = relpath.rpartition("/")
+    stem, ext = _split_ext(name)
+    return head + "/" + _cap_segment(stem + suffix + ext)
+
+
+def place_file(out_dir: str, relpath: str, data: bytes, sha: str, ts: str) -> str:
+    """Write data at relpath, or reuse it when identical bytes are already
+    there. A different file at the same path gets __<ts> (then -2, -3)."""
+    candidate = relpath
+    n = 1
+    while True:
+        full = resolve_inside(out_dir, candidate)
+        if not os.path.exists(full):
+            write_atomic(full, data)
+            return candidate
+        if os.path.isfile(full) and sha256_file(full) == sha:
+            return candidate
+        n += 1
+        candidate = _with_suffix(relpath, "__%s" % ts if n == 2 else "__%s-%d" % (ts, n - 1))
+
+
+def parse_data_uri(uri: str):
+    head, sep, payload = uri[5:].partition(",")
+    if not sep:
+        return None
+    params = [p.strip().lower() for p in head.split(";")]
+    mime = params[0] or "text/plain"
+    try:
+        if "base64" in params[1:]:
+            payload = re.sub(r"\s+", "", urllib.parse.unquote(payload))
+            data = base64.b64decode(payload + "=" * (-len(payload) % 4))
+        else:
+            data = urllib.parse.unquote_to_bytes(payload)
+    except ValueError:
+        return None
+    return mime, data
+
+
+def inline_key(uri: str) -> str:
+    """Short stable manifest key for a data: URI (which can be megabytes)."""
+    mime = uri[5:].split(",", 1)[0].split(";", 1)[0] or "text/plain"
+    return "data:%s;sha256=%s" % (mime, hashlib.sha256(uri.encode("utf-8", "surrogateescape")).hexdigest()[:16])
+
+
+# --------------------------------------------------------------- manifest
+
+MANIFEST_COLUMNS = [
+    "original_url", "requested_timestamp", "timestamp", "wayback_url", "status",
+    "sha256", "saved_path", "kind", "found_via", "source", "mimetype",
+    "cdx_digest", "bytes", "content_encoding", "error", "fetched_at",
+]
+# Rows in these states are final: a rerun skips them.
+RESUME_SKIP = frozenset(("ok", "duplicate", "not-archived", "type-mismatch", "inline-data"))
+
+
+class Manifest:
+    """<out>/manifest.csv: append-only while running (each row flushed),
+    last row per (original_url, requested_timestamp) wins on load,
+    compacted atomically at a clean exit."""
+
+    def __init__(self, out_dir: str):
+        self.out_dir = out_dir
+        self.path = os.path.join(out_dir, "manifest.csv")
+        self.rows = {}
+        self.sha_paths = {}
+        self.digest_paths = {}
+        self._fh = None
+        self._writer = None
+        self._dirty = False
+        if os.path.exists(self.path):
+            with open(self.path, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    self._index(self._clean(row))
+
+    @staticmethod
+    def _clean(row: dict) -> dict:
+        return {c: "" if row.get(c) is None else str(row.get(c)) for c in MANIFEST_COLUMNS}
+
+    def _index(self, row: dict) -> None:
+        self.rows[(row["original_url"], row["requested_timestamp"])] = row
+        if row["kind"] == "page" or not row["saved_path"]:
+            return
+        if row["status"] == "ok" and row["sha256"]:
+            self.sha_paths.setdefault(row["sha256"], row["saved_path"])
+        if row["status"] in ("ok", "duplicate") and row["cdx_digest"]:
+            self.digest_paths.setdefault(row["cdx_digest"], row["saved_path"])
+
+    def get(self, key: tuple):
+        return self.rows.get(key)
+
+    def append(self, row: dict) -> dict:
+        row = self._clean(row)
+        if self._fh is None:
+            os.makedirs(self.out_dir, exist_ok=True)
+            size = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+            self._fh = open(self.path, "a", newline="", encoding="utf-8")
+            if size:
+                with open(self.path, "rb") as fh:
+                    fh.seek(-1, os.SEEK_END)
+                    if fh.read(1) != b"\n":
+                        self._fh.write("\n")  # a crash left a partial line
+            self._writer = csv.DictWriter(self._fh, fieldnames=MANIFEST_COLUMNS, lineterminator="\n")
+            if not size:
+                self._writer.writeheader()
+        self._writer.writerow(row)
+        self._fh.flush()
+        self._dirty = True
+        self._index(row)
+        return row
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+            self._writer = None
+
+    def compact(self) -> None:
+        self.close()
+        if not self._dirty and not os.path.exists(self.path):
+            return
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=MANIFEST_COLUMNS, lineterminator="\n")
+            writer.writeheader()
+            for row in self.rows.values():
+                writer.writerow(row)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)
+
+
+# -------------------------------------------------------------- workflows
+
+
+class Run:
+    """Shared state for one CLI invocation."""
+
+    def __init__(self, args, client, stdout, stderr, clock):
+        self.args = args
+        self.client = client
+        self.out_dir = args.out
+        self.stdout = stdout
+        self.stderr = stderr
+        self.clock = clock
+        self.exit_code = EXIT_OK
+        self._manifest = None
+
+    @property
+    def manifest(self) -> Manifest:
+        if self._manifest is None:
+            self._manifest = Manifest(self.out_dir)
+        return self._manifest
+
+    def info(self, message: str) -> None:
+        if not self.args.quiet:
+            self.stderr.write(message + "\n")
+
+    def say(self, line: str = "") -> None:
+        self.stdout.write(line + "\n")
+
+    def emit_json(self, obj) -> None:
+        self.stdout.write(json.dumps(obj, indent=2) + "\n")
+
+    def row(self, fields: dict) -> dict:
+        fields = dict(fields)
+        fields.setdefault("fetched_at", iso_utc(self.clock()))
+        return self.manifest.append(fields)
+
+    def close(self, compact: bool) -> None:
+        if self._manifest is not None:
+            if compact:
+                self._manifest.compact()
+            else:
+                self._manifest.close()
+
+
+def cdx_request(run: Run, url: str) -> CdxPage:
+    fetched = run.client.get(url)
+    resp = fetched.response
+    if resp.status != 200:
+        snippet = " ".join(resp.body[:200].decode("utf-8", "replace").split())
+        raise CdxError("CDX query returned HTTP %d %s" % (resp.status, snippet))
+    dec = decode_body(resp.body, resp.header("content-encoding"), sniff=True)
+    if dec.status != "ok":
+        raise CdxError("CDX response could not be decoded (%s, %s)" % (dec.status, dec.encoding))
+    return parse_cdx(dec.data)
+
+
+def cdx_listing(run: Run, domain: str, from_ts=None, to_ts=None, loose_mime=False, cdx_limit=2000) -> list:
+    """Archived images of a domain and its subdomains, paginated with the
+    resume key and capped at cdx_limit rows."""
+    filters = [LOOSE_MIME_FILTER if loose_mime else "mimetype:image/.*", "statuscode:200"]
+    rows = []
+    resume = None
+    while len(rows) < cdx_limit:
+        want = min(CDX_PAGE_SIZE, cdx_limit - len(rows))
+        query = build_cdx_query(
+            domain, match_type="domain", filters=filters, collapse="digest",
+            from_ts=from_ts, to_ts=to_ts, limit=want, show_resume_key=True, resume_key=resume,
+        )
+        try:
+            page = cdx_request(run, query)
+        except CapReached:
+            run.info("request cap reached during the CDX listing; continuing with %d rows" % len(rows))
+            break
+        rows.extend(page.rows[:want])
+        if not page.resume_key or not page.rows:
+            break
+        resume = page.resume_key
+    return rows
+
+
+class Item:
+    __slots__ = ("url", "requested_ts", "found_via", "digest", "mimetype", "inline")
+
+    def __init__(self, url, requested_ts, found_via, digest="", mimetype="", inline=False):
+        self.url = url
+        self.requested_ts = requested_ts
+        self.found_via = found_via
+        self.digest = digest
+        self.mimetype = mimetype
+        self.inline = inline
+
+    def key(self) -> tuple:
+        return (inline_key(self.url) if self.inline else self.url, self.requested_ts)
+
+
+def listing_items(rows: list) -> list:
+    """One item per CDX digest (collapse=digest only drops adjacent rows)."""
+    items = []
+    digests = set()
+    keys = set()
+    for r in rows:
+        digest = r.get("digest", "")
+        if digest and digest in digests:
+            continue
+        original = r.get("original", "")
+        if not original:
+            continue
+        try:
+            url = normalize_url(original if has_scheme(original) else "http://" + original)
+        except ValueError:
+            continue
+        ts = r.get("timestamp", "")
+        if (url, ts) in keys:
+            continue
+        digests.add(digest)
+        keys.add((url, ts))
+        items.append(Item(url, ts, "cdx-listing", digest=digest, mimetype=r.get("mimetype", "")))
+    return items
+
+
+class PageResult:
+    def __init__(self, url: str):
+        self.url = url
+        self.base_url = ""
+        self.wayback_url = ""
+        self.requested_timestamp = ""
+        self.timestamp = ""
+        self.latest_path = None
+        self.http_status = 0
+        self.status = "error"
+        self.content_type = ""
+        self.content_encoding = ""
+        self.raw_bytes = 0
+        self.decoded_bytes = 0
+        self.charset = ""
+        self.flags = []
+        self.toolbar_injected = False
+        self.js_rendered = False
+        self.js_reasons = []
+        self.content_images = 0
+        self.extraction = None
+        self.js_strings = []
+        self.host_report = []
+        self.saved_path = ""
+        self.sha256 = ""
+        self.error = ""
+        self.decoded = None
+
+    def candidates(self) -> list:
+        if self.extraction is None:
+            return []
+        out = [(c.url, c.found_via) for c in self.extraction.candidates]
+        if self.js_rendered:
+            known = {u for u, _ in out}
+            out += [(u, "js-string") for u in self.js_strings if u not in known]
+        return out
+
+    def as_dict(self) -> dict:
+        cands = self.candidates()
+        return {
+            "url": self.url,
+            "base_url": self.base_url,
+            "wayback_url": self.wayback_url,
+            "requested_timestamp": self.requested_timestamp,
+            "timestamp": self.timestamp,
+            "latest_path": self.latest_path,
+            "http_status": self.http_status,
+            "status": self.status,
+            "content_type": self.content_type,
+            "content_encoding": self.content_encoding,
+            "raw_bytes": self.raw_bytes,
+            "decoded_bytes": self.decoded_bytes,
+            "charset": self.charset,
+            "flags": self.flags,
+            "toolbar_injected": self.toolbar_injected,
+            "js_rendered": self.js_rendered,
+            "js_reasons": self.js_reasons,
+            "content_images": self.content_images,
+            "candidates": [{"url": _short_uri(u), "found_via": v} for u, v in cands],
+            "found_via": dict(collections.Counter(v for _, v in cands)),
+            "host_report": [list(kv) for kv in self.host_report],
+            "saved_path": self.saved_path,
+            "error": self.error,
+        }
+
+
+def _short_uri(url: str) -> str:
+    return url if not url.startswith("data:") or len(url) <= 100 else url[:96] + "..."
+
+
+def analyse_page(run: Run, user_url: str, timestamp=None, latest: bool = False) -> PageResult:
+    """Resolve the capture, fetch it via id_, decode, check, extract, save."""
+    pr = PageResult(user_url)
+    target = fetch_target(user_url)
+    cdx_original = None
+    if latest:
+        rows = []
+        query = build_cdx_query(
+            cdx_target(user_url), filters=["statuscode:200", "mimetype:text/html"], limit=-1
+        )
+        try:
+            rows = cdx_request(run, query).rows
+        except CdxError as e:
+            run.info("latest: CDX lookup failed (%s)" % e)
+        if len(rows) == 1:
+            pr.latest_path = "cdx-negative-limit"
+            ts = rows[0].get("timestamp", "")
+            cdx_original = rows[0].get("original") or target
+            fetch_url = wayback_url(ts, cdx_original)
+        else:
+            if len(rows) > 1:
+                run.info("latest: CDX returned %d rows for limit=-1, so negative limit is not honoured" % len(rows))
+            pr.latest_path = "now-redirect"
+            ts = ts14(run.clock())
+            fetch_url = wayback_url(ts, target)
+        run.info("latest: using the %s path" % pr.latest_path)
+    else:
+        ts = timestamp
+        fetch_url = wayback_url(ts, target)
+
+    fetched = run.client.get(fetch_url)
+    resp = fetched.response
+    pr.wayback_url = fetched.final_url
+    parsed = parse_wayback_url(fetched.final_url)
+    pr.timestamp = parsed[0] if parsed else ts
+    # --latest keys the page on the capture actually used, so reruns match.
+    pr.requested_timestamp = pr.timestamp if latest else ts
+    original = cdx_original or (parsed[2] if parsed else target)
+    pr.base_url = normalize_url(original)
+    pr.http_status = resp.status
+    pr.content_type = resp.header("content-type") or ""
+    pr.raw_bytes = len(resp.body)
+    if fetched.too_many_redirects:
+        pr.error = "more than %d redirects" % MAX_HOPS
+    elif resp.status == 404:
+        pr.status = "not-archived"
+    elif resp.status != 200:
+        pr.status = "http-%d" % resp.status
+    else:
+        _decode_page(run, pr, resp, original)
+    _save_page(run, pr)
+    return pr
+
+
+def _decode_page(run: Run, pr: PageResult, resp: Response, original: str) -> None:
+    dec = decode_body(resp.body, resp.header("content-encoding"), sniff=True)
+    if dec.status == "encoding-unsupported":
+        # Rewrite mode (no id_) came back as plain text in the sbx run; the
+        # extractor unwraps the rewritten URLs.
+        run.info("page body is %s, which this Python cannot decode; retrying once in rewrite mode" % dec.encoding)
+        retry = run.client.get(wayback_url(pr.timestamp, original, mod=""))
+        r2 = retry.response
+        if r2.status == 200 and not retry.too_many_redirects:
+            dec2 = decode_body(r2.body, r2.header("content-encoding"), sniff=True)
+            if dec2.status == "ok":
+                pr.error = "id_ body was %s; used rewrite mode" % dec.encoding
+                dec = dec2
+                dec.flags.append("rewrite-mode")
+                pr.wayback_url = retry.final_url
+                pr.content_type = r2.header("content-type") or pr.content_type
+                pr.raw_bytes = len(r2.body)
+        if dec.status == "encoding-unsupported":
+            pr.status = "encoding-unsupported"
+            pr.content_encoding = dec.encoding
+            pr.error = "Content-Encoding %s not decodable without an optional module" % dec.encoding
+            return
+    pr.content_encoding = dec.encoding
+    pr.flags = list(dec.flags)
+    pr.decoded = dec.data
+    pr.decoded_bytes = len(dec.data)
+    text, pr.charset = decode_html(dec.data, pr.content_type)
+    pr.toolbar_injected = "rewrite-mode" not in pr.flags and is_toolbar_injected(text)
+    ex = extract(text, pr.base_url)
+    pr.extraction = ex
+    pr.js_rendered, pr.js_reasons = js_verdict(ex, text)
+    pr.content_images = content_image_count(ex)
+    pr.js_strings = scan_js_strings(ex.scripts)
+    pr.host_report = host_report(ex, urllib.parse.urlsplit(pr.base_url).hostname or "")
+    if dec.status == "encoding-mismatch":
+        pr.status = "encoding-mismatch"
+        pr.error = "Content-Encoding %s did not decode; raw bytes kept" % dec.encoding
+    elif pr.toolbar_injected:
+        pr.status = "toolbar-injected"
+        pr.error = "Wayback toolbar markup in an id_ body: the raw modifier was lost"
+    else:
+        pr.status = "ok"
+
+
+def _save_page(run: Run, pr: PageResult) -> None:
+    if pr.decoded is not None:
+        pr.sha256 = sha256_bytes(pr.decoded)
+        rel = page_relpath(pr.timestamp, pr.base_url)
+        pr.saved_path = place_file(run.out_dir, rel, pr.decoded, pr.sha256, pr.timestamp)
+    run.row({
+        "original_url": pr.base_url,
+        "requested_timestamp": pr.requested_timestamp,
+        "timestamp": pr.timestamp,
+        "wayback_url": pr.wayback_url,
+        "status": pr.status,
+        "sha256": pr.sha256,
+        "saved_path": pr.saved_path,
+        "kind": "page",
+        "found_via": "page",
+        "source": "wayback",
+        "mimetype": (pr.content_type.split(";", 1)[0].strip().lower()),
+        "bytes": pr.decoded_bytes if pr.decoded is not None else pr.raw_bytes,
+        "content_encoding": pr.content_encoding,
+        "error": "; ".join(x for x in (pr.error, ",".join(pr.flags)) if x),
+    })
+
+
+def follow_css(run: Run, pr: PageResult) -> list:
+    """--follow-css: fetch linked stylesheets via id_ and resolve their
+    url() references against the stylesheet URL."""
+    items = []
+    known = {c.url for c in pr.extraction.candidates}
+    for css_url in pr.extraction.stylesheets:
+        try:
+            fetched = run.client.get(wayback_url(pr.timestamp, css_url))
+        except CapReached:
+            run.info("request cap reached while following stylesheets")
+            break
+        except BadUrl:
+            continue
+        resp = fetched.response
+        if resp.status != 200 or fetched.too_many_redirects:
+            continue
+        dec = decode_body(resp.body, resp.header("content-encoding"), sniff=True)
+        if dec.status != "ok":
+            continue
+        parsed = parse_wayback_url(fetched.final_url)
+        css_base = normalize_url(parsed[2]) if parsed else css_url
+        for raw in css_urls(dec.data.decode("utf-8", "replace")):
+            r = resolve_ref(raw, css_base)
+            if not r or r[1] or _url_ext(r[0]) in NON_IMAGE_EXTS or r[0] in known:
+                continue
+            known.add(r[0])
+            items.append(Item(r[0], pr.timestamp, "css-link"))
+    return items
+
+
+def nearest_capture(run: Run, item: Item):
+    """After a 404 on the direct id_ request: one exact-URL CDX lookup."""
+    query = build_cdx_query(item.url, filters=["statuscode:200"], collapse="digest", limit=200)
+    try:
+        rows = cdx_request(run, query).rows
+    except CdxError:
+        return None
+    if not rows:
+        return None
+
+    def distance(row):
+        ts = row.get("timestamp", "")
+        return abs(int(ts.ljust(14, "0")[:14] or 0) - int(item.requested_ts.ljust(14, "0")[:14] or 0))
+
+    best = min((r for r in rows if r.get("timestamp", "").isdigit()), key=distance, default=None)
+    if best is None:
+        return None
+    return best["timestamp"], best.get("original") or item.url
+
+
+def _image_row(run: Run, item: Item, base: dict, fetched: Fetched, source: str) -> dict:
+    resp = fetched.response
+    parsed = parse_wayback_url(fetched.final_url) if source == "wayback" else None
+    row = dict(base)
+    row.update({
+        "wayback_url": fetched.final_url if source == "wayback" else "",
+        "timestamp": parsed[0] if parsed else "",
+        "source": source,
+        "mimetype": resp.media_type() or base.get("mimetype", ""),
+    })
+    if fetched.too_many_redirects:
+        row.update(status="error", error="more than %d redirects" % MAX_HOPS)
+        return run.row(row)
+    if resp.status == 404:
+        row["status"] = "not-archived"
+        return run.row(row)
+    if resp.status != 200:
+        row["status"] = "http-%d" % resp.status
+        return run.row(row)
+    dec = decode_body(resp.body, resp.header("content-encoding"))
+    row["content_encoding"] = dec.encoding
+    if dec.status != "ok":
+        row.update(status=dec.status, bytes=len(resp.body), error="Content-Encoding %s" % dec.encoding)
+        return run.row(row)
+    row["bytes"] = len(dec.data)
+    ext = sniff_image(dec.data)
+    if ext is None:
+        row.update(status="type-mismatch", error="200 body is not an image (%s)" % (resp.media_type() or "no type"))
+        return run.row(row)
+    sha = sha256_bytes(dec.data)
+    row["sha256"] = sha
+    first = run.manifest.sha_paths.get(sha)
+    if first:
+        row.update(status="duplicate", saved_path=first)
+        return run.row(row)
+    rel = image_relpath(item.url, ext)
+    row.update(status="ok", saved_path=place_file(run.out_dir, rel, dec.data, sha, row["timestamp"] or ts14(run.clock())))
+    return run.row(row)
+
+
+def _try_live(run: Run, item: Item, base: dict):
+    """--prefer-live: the original host first; None means use Wayback."""
+    try:
+        fetched = run.client.get(item.url, live=True)
+    except (NetworkError, BadUrl, TLSError) as e:
+        run.info("live fetch failed for %s (%s); using Wayback" % (item.url, e))
+        return None
+    resp = fetched.response
+    if fetched.too_many_redirects or resp.status != 200:
+        return None
+    dec = decode_body(resp.body, resp.header("content-encoding"))
+    if dec.status != "ok" or sniff_image(dec.data) is None:
+        return None
+    return _image_row(run, item, base, fetched, "live")
+
+
+def _inline_row(run: Run, item: Item, base: dict) -> dict:
+    row = dict(base, source="inline")
+    if not run.args.save_inline:
+        row.update(status="inline-data", error="data: URI; pass --save-inline to save it")
+        return run.row(row)
+    parsed = parse_data_uri(item.url)
+    if parsed is None:
+        row.update(status="error", error="malformed data: URI")
+        return run.row(row)
+    mime, data = parsed
+    row.update(mimetype=mime, bytes=len(data))
+    ext = sniff_image(data)
+    if ext is None:
+        row.update(status="type-mismatch", error="data: URI is not an image")
+        return run.row(row)
+    sha = sha256_bytes(data)
+    row["sha256"] = sha
+    first = run.manifest.sha_paths.get(sha)
+    if first:
+        row.update(status="duplicate", saved_path=first)
+        return run.row(row)
+    rel = "images/inline/%s.%s" % (sha[:16], ext)
+    row.update(status="ok", saved_path=place_file(run.out_dir, rel, data, sha, item.requested_ts))
+    return run.row(row)
+
+
+def handle_item(run: Run, item: Item) -> dict:
+    key = item.key()
+    prev = run.manifest.get(key)
+    save_inline = getattr(run.args, "save_inline", False)
+    if prev and prev["status"] in RESUME_SKIP and not (save_inline and prev["status"] == "inline-data"):
+        return prev
+    base = {
+        "original_url": key[0],
+        "requested_timestamp": item.requested_ts,
+        "kind": "image",
+        "found_via": item.found_via,
+        "cdx_digest": item.digest,
+        "mimetype": item.mimetype,
+    }
+    if item.inline:
+        return _inline_row(run, item, base)
+    if item.digest and item.digest in run.manifest.digest_paths:
+        return run.row(dict(base, status="duplicate", saved_path=run.manifest.digest_paths[item.digest],
+                            error="CDX digest already saved"))
+    target = wayback_url(item.requested_ts, item.url)
+    if run.args.dry_run:
+        return run.row(dict(base, status="planned", wayback_url=target))
+    if getattr(run.args, "prefer_live", False):
+        row = _try_live(run, item, base)
+        if row is not None:
+            return row
+    fetched = run.client.get(target)
+    if fetched.response.status == 404 and item.found_via != "cdx-listing" and not fetched.too_many_redirects:
+        alt = nearest_capture(run, item)
+        if alt is not None:
+            fetched = run.client.get(wayback_url(alt[0], alt[1]))
+    return _image_row(run, item, base, fetched, "wayback")
+
+
+def process_items(run: Run, items: list) -> collections.Counter:
+    """Fetch every item, resumably. Returns counts by status."""
+    items = sorted(items, key=lambda i: not i.inline)  # inline needs no requests
+    statuses = collections.Counter()
+    total = len(items)
+    for idx, item in enumerate(items):
+        try:
+            row = handle_item(run, item)
+        except CapReached:
+            run.info("request cap (--max-requests %d) reached; rerun the same command to resume"
+                     % run.client.max_requests)
+            for rest in items[idx:]:
+                prev = run.manifest.get(rest.key())
+                if prev and prev["status"] in RESUME_SKIP:
+                    statuses[prev["status"]] += 1
+                    continue
+                run.row({"original_url": rest.key()[0], "requested_timestamp": rest.requested_ts,
+                         "kind": "image", "found_via": rest.found_via, "cdx_digest": rest.digest,
+                         "mimetype": rest.mimetype, "status": "skipped-cap"})
+                statuses["skipped-cap"] += 1
+            run.exit_code = EXIT_CAP
+            break
+        except RateLimited as e:
+            run.row({"original_url": item.key()[0], "requested_timestamp": item.requested_ts,
+                     "kind": "image", "found_via": item.found_via, "cdx_digest": item.digest,
+                     "status": "rate-limited", "error": str(e)})
+            statuses["rate-limited"] += 1
+            run.info("archive.org kept throttling (%s). Stopped; rerun the same command later "
+                     "(it resumes) rather than lowering --delay." % e)
+            run.exit_code = EXIT_RATE
+            break
+        except BadUrl as e:
+            row = run.row({"original_url": item.key()[0], "requested_timestamp": item.requested_ts,
+                           "kind": "image", "found_via": item.found_via, "status": "error", "error": str(e)})
+        statuses[row["status"]] += 1
+        run.info("[%d/%d] %-14s %s" % (idx + 1, total, row["status"], _short_uri(item.url)))
+    return statuses
+
+
+# --------------------------------------------------------------- commands
+
+
+def _fmt(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value) if value else "none"
+    if value is None:
+        return ""
+    return str(value)
+
+
+def cmd_snapshots(run: Run) -> int:
+    a = run.args
+    if a.match in ("prefix", "host", "domain") and is_shared_host(site_domain(a.url)):
+        raise SalvageError("refusing a %s listing on shared host %s: it holds captures for unrelated "
+                           "sites. Query exact URLs instead." % (a.match, site_domain(a.url)))
+    filters = ["statuscode:%s" % a.status] if a.status else []
+    query = build_cdx_query(
+        cdx_target(a.url), match_type=a.match, filters=filters, collapse=a.collapse,
+        from_ts=a.from_ts, to_ts=a.to_ts, limit=a.limit,
+    )
+    rows = []
+    for r in cdx_request(run, query).rows:
+        ts, original = r.get("timestamp", ""), r.get("original", "")
+        rows.append({
+            "timestamp": ts, "original": original, "status": r.get("statuscode", ""),
+            "mimetype": r.get("mimetype", ""), "digest": r.get("digest", ""),
+            "length": r.get("length", ""), "wayback_url": wayback_url(ts, original, mod=""),
+        })
+    if a.json:
+        run.emit_json(rows)
+    elif not rows:
+        run.say("no captures for %s" % a.url)
+    else:
+        cols = ["timestamp", "original", "status", "mimetype", "digest", "length", "wayback_url"]
+        run.say("\t".join(cols))
+        for r in rows:
+            run.say("\t".join(r[c] for c in cols))
+    return EXIT_OK
+
+
+def cmd_fetch(run: Run) -> int:
+    a = run.args
+    target = fetch_target(a.url)
+    url = wayback_url(a.timestamp, target)
+    if a.dry_run:
+        info = {"dry_run": True, "would_fetch": url}
+    else:
+        fetched = run.client.get(url)
+        resp = fetched.response
+        dec = decode_body(resp.body, resp.header("content-encoding"), sniff=is_textual(resp.media_type()))
+        parsed = parse_wayback_url(fetched.final_url)
+        info = {
+            "url": target,
+            "wayback_url": fetched.final_url,
+            "requested_timestamp": a.timestamp,
+            "timestamp": parsed[0] if parsed else "",
+            "hops": len(fetched.hops),
+            "http_status": resp.status,
+            "content_type": resp.header("content-type") or "",
+            "content_encoding": dec.encoding,
+            "status": dec.status,
+            "flags": dec.flags,
+            "bytes": len(dec.data),
+            "sha256": sha256_bytes(dec.data),
+            "image_type": sniff_image(dec.data) or "",
+        }
+        if "html" in resp.media_type():
+            info["toolbar_injected"] = is_toolbar_injected(decode_html(dec.data, info["content_type"])[0])
+        if fetched.too_many_redirects:
+            info["error"] = "more than %d redirects" % MAX_HOPS
+        if a.save:
+            write_atomic(os.path.abspath(a.save), dec.data)
+            info["saved"] = a.save
+    if a.json:
+        run.emit_json(info)
+    else:
+        for k, v in info.items():
+            run.say("%s=%s" % (k, _fmt(v)))
+    return EXIT_OK
+
+
+def _print_page(run: Run, pr: PageResult) -> None:
+    d = pr.as_dict()
+    if run.args.json:
+        run.emit_json(d)
+        return
+    for k in ("url", "base_url", "wayback_url", "requested_timestamp", "timestamp", "latest_path",
+              "http_status", "status", "content_type", "content_encoding", "raw_bytes", "decoded_bytes",
+              "charset", "flags", "toolbar_injected", "js_rendered", "js_reasons", "content_images",
+              "saved_path", "error"):
+        if k == "latest_path" and d[k] is None:
+            continue
+        run.say("%s=%s" % (k, _fmt(d[k])))
+    run.say("candidates=%d" % len(d["candidates"]))
+    for via, n in sorted(d["found_via"].items()):
+        run.say("found_via.%s=%d" % (via, n))
+    for host, n in d["host_report"]:
+        run.say("script_host.%s=%d" % (host, n))
+    for c in d["candidates"]:
+        run.say("candidate=%s %s" % (c["found_via"], c["url"]))
+
+
+def cmd_page(run: Run) -> int:
+    a = run.args
+    pr = analyse_page(run, a.url, a.timestamp, a.latest)
+    _print_page(run, pr)
+    return EXIT_OK
+
+
+def _print_summary(run: Run, summary: dict) -> None:
+    if run.args.json:
+        run.emit_json(summary)
+        return
+    for k, v in summary.items():
+        if isinstance(v, dict):
+            for sub, n in sorted(v.items()):
+                run.say("%s.%s=%s" % (k, sub, n))
+        elif k == "host_report":
+            for host, n in v:
+                run.say("script_host.%s=%d" % (host, n))
+        elif v is not None:
+            run.say("%s=%s" % (k, _fmt(v)))
+
+
+def cmd_images(run: Run) -> int:
+    a = run.args
+    pr = analyse_page(run, a.url, a.timestamp, a.latest)
+    run.info("page %s @ %s: %s (js_rendered=%s)" % (pr.base_url, pr.timestamp, pr.status, _fmt(pr.js_rendered)))
+    items = []
+    if pr.extraction is not None:
+        items = [Item(c.url, pr.timestamp, c.found_via, inline=c.inline) for c in pr.extraction.candidates]
+        if a.follow_css:
+            items += follow_css(run, pr)
+    fallback = a.fallback == "always" or (a.fallback == "auto" and pr.js_rendered)
+    if fallback:
+        known = {i.url for i in items}
+        for url in pr.js_strings:
+            if url not in known:
+                known.add(url)
+                items.append(Item(url, pr.timestamp, "js-string"))
+        domain = own_domain(urllib.parse.urlsplit(pr.base_url).hostname or "")
+        if not domain or is_shared_host(domain):
+            run.info("fallback: no CDX listing for %s (shared or empty host)" % (domain or "?"))
+        else:
+            try:
+                rows = cdx_listing(run, domain)
+            except CdxError as e:
+                run.info("fallback: CDX listing failed (%s)" % e)
+                rows = []
+            for it in listing_items(rows):
+                if it.url not in known:
+                    known.add(it.url)
+                    items.append(it)
+    found_via = dict(collections.Counter(i.found_via for i in items))
+    run.info("candidates: %d (%s)" % (len(items), ", ".join("%s %d" % kv for kv in sorted(found_via.items())) or "none"))
+    if pr.host_report:
+        run.info("third-party script hosts: " + ", ".join("%s %d" % kv for kv in pr.host_report))
+    statuses = process_items(run, items)
+    _print_summary(run, {
+        "page": pr.base_url,
+        "page_status": pr.status,
+        "requested_timestamp": pr.requested_timestamp,
+        "timestamp": pr.timestamp,
+        "latest_path": pr.latest_path,
+        "content_encoding": pr.content_encoding,
+        "toolbar_injected": pr.toolbar_injected,
+        "js_rendered": pr.js_rendered,
+        "js_reasons": pr.js_reasons,
+        "fallback_ran": fallback,
+        "dry_run": bool(a.dry_run),
+        "candidates": len(items),
+        "found_via": found_via,
+        "host_report": [list(kv) for kv in pr.host_report],
+        "status": dict(statuses),
+        "requests": run.client.count,
+        "exit_code": run.exit_code,
+    })
+    return run.exit_code
+
+
+def cmd_site_images(run: Run) -> int:
+    a = run.args
+    domain = site_domain(a.domain)
+    if not domain:
+        raise SalvageError("no domain in %r" % a.domain)
+    if is_shared_host(domain):
+        raise SalvageError("refusing a domain listing on shared host %s: it holds captures for unrelated "
+                           "sites. Use images or fetch with exact URLs instead." % domain)
+    rows = cdx_listing(run, domain, a.from_ts, a.to_ts, a.loose_mime, a.cdx_limit)
+    items = listing_items(rows)
+    run.info("CDX listing: %d rows, %d unique digests" % (len(rows), len(items)))
+    statuses = process_items(run, items)
+    _print_summary(run, {
+        "domain": domain,
+        "cdx_rows": len(rows),
+        "candidates": len(items),
+        "dry_run": bool(a.dry_run),
+        "status": dict(statuses),
+        "requests": run.client.count,
+        "exit_code": run.exit_code,
+    })
+    return run.exit_code
+
+
+def cmd_verify(args, stdout, stderr) -> int:
+    path = os.path.join(args.out, "manifest.csv")
+    if not os.path.exists(path):
+        stderr.write("error: no manifest.csv in %s\n" % args.out)
+        return EXIT_ERROR
+    manifest = Manifest(args.out)
+    rows = list(manifest.rows.values())
+    by_status = collections.Counter(r["status"] for r in rows)
+    by_found_via = collections.Counter(r["found_via"] or "-" for r in rows)
+    checked, modified, missing = [], [], []
+    for r in rows:
+        rel = r["saved_path"]
+        if not rel or not r["sha256"] or r["status"] not in ("ok", "duplicate") or rel in checked:
+            continue
+        checked.append(rel)
+        try:
+            full = resolve_inside(args.out, rel)
+        except ValueError:
+            missing.append(rel)
+            continue
+        if not os.path.isfile(full):
+            missing.append(rel)
+        elif sha256_file(full) != r["sha256"]:
+            modified.append(rel)
+    report = {
+        "manifest": path,
+        "rows": len(rows),
+        "files_checked": len(checked),
+        "files_ok": len(checked) - len(modified) - len(missing),
+        "modified": modified,
+        "missing": missing,
+        "by_status": dict(by_status),
+        "by_found_via": dict(by_found_via),
+    }
+    if args.json:
+        stdout.write(json.dumps(report, indent=2) + "\n")
+    else:
+        for k in ("rows", "files_checked", "files_ok"):
+            stdout.write("%s=%d\n" % (k, report[k]))
+        stdout.write("modified=%d\nmissing=%d\n" % (len(modified), len(missing)))
+        for s, n in sorted(by_status.items()):
+            stdout.write("status.%s=%d\n" % (s, n))
+        for v, n in sorted(by_found_via.items()):
+            stdout.write("found_via.%s=%d\n" % (v, n))
+        for rel in modified:
+            stdout.write("modified %s\n" % rel)
+        for rel in missing:
+            stdout.write("missing %s\n" % rel)
+    return EXIT_VERIFY if modified or missing else EXIT_OK
+
+
+# --------------------------------------------------------------------- CLI
+
+EXIT_CODES_HELP = """\
+exit codes:
+  0  done
+  1  usage or unexpected error
+  2  --max-requests reached (resumable: rerun the same command)
+  3  stopped on sustained 429/503 (resumable: rerun later, do not lower --delay)
+  4  TLS verification failed (the message names the fix)
+  5  verify found a modified or missing file
+"""
+
+
+class _ParserExit(Exception):
+    def __init__(self, status: int):
+        super().__init__(status)
+        self.status = status
+
+
+def _ts_arg(value: str) -> str:
+    if not TS_RE.match(value):
+        raise argparse.ArgumentTypeError("expected 1 to 14 digits (YYYYMMDDhhmmss), got %r" % value)
+    return value
+
+
+def _int_arg(minimum: int):
+    def parse(value: str) -> int:
+        try:
+            n = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError("expected an integer, got %r" % value)
+        if n < minimum:
+            raise argparse.ArgumentTypeError("must be at least %d" % minimum)
+        return n
+
+    return parse
+
+
+def _delay_arg(value: str) -> float:
+    try:
+        f = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected seconds, got %r" % value)
+    if not f >= 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return f
+
+
+def build_parser(stdout, stderr) -> argparse.ArgumentParser:
+    class Parser(argparse.ArgumentParser):
+        def _print_message(self, message, file=None):
+            if not message:
+                return
+            if file is None or file is sys.stdout:
+                stdout.write(message)
+            elif file is sys.stderr:
+                stderr.write(message)
+            else:
+                file.write(message)
+
+        def exit(self, status=0, message=None):
+            if message:
+                stderr.write(message)
+            raise _ParserExit(status)
+
+        def error(self, message):
+            self.print_usage(stderr)
+            stderr.write("%s: error: %s\n" % (self.prog, message))
+            raise _ParserExit(EXIT_ERROR)
+
+    common = Parser(add_help=False)
+    g = common.add_argument_group("common options")
+    g.add_argument("-o", "--out", metavar="DIR", default="./wayback-out",
+                   help="output directory for files, manifest.csv and requests.jsonl (default: ./wayback-out)")
+    g.add_argument("--delay", metavar="SECONDS", type=_delay_arg, default=6.0,
+                   help="minimum seconds between archive.org requests, plus 0-1 s jitter (default: 6)")
+    g.add_argument("-n", "--max-requests", metavar="N", type=_int_arg(1), default=300,
+                   help="stop after N HTTP requests, redirect hops included; exit 2, resumable (default: 300)")
+    g.add_argument("--max-retries", metavar="N", type=_int_arg(0), default=4,
+                   help="retries on 429/502/503/504 and resets before exit 3 (default: 4)")
+    g.add_argument("--user-agent", metavar="STR", default=DEFAULT_UA, help="User-Agent header (default: %(default)s)")
+    g.add_argument("--cafile", metavar="PATH", help="CA bundle for TLS verification (verification is never disabled)")
+    g.add_argument("--dry-run", action="store_true",
+                   help="run CDX queries and the page fetch, download no images; manifest gets planned rows")
+    g.add_argument("--record", metavar="DIR", help="save every raw response (status, headers, body) in the test-fixture format")
+    g.add_argument("--quiet", action="store_true", help="no progress messages on stderr")
+    g.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
+
+    parser = Parser(
+        description="Recover archived pages and images from the Wayback Machine (stdlib only, polite by default).",
+        epilog=EXIT_CODES_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version="wayback-salvage " + VERSION)
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.required = True
+
+    def add(name, help_text, description):
+        return sub.add_parser(name, parents=[common], help=help_text, description=description,
+                              epilog=EXIT_CODES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    def capture_choice(p):
+        grp = p.add_mutually_exclusive_group(required=True)
+        grp.add_argument("-t", "--timestamp", metavar="TS", type=_ts_arg,
+                         help="capture timestamp, 1 to 14 digits; Wayback redirects to the nearest capture")
+        grp.add_argument("--latest", action="store_true",
+                         help="newest 200 text/html capture (CDX limit=-1, else the now-timestamp redirect)")
+
+    p = add("snapshots", "list captures of a URL (CDX)",
+            "CDX query. Prints timestamp, original, status, mimetype, digest, length and the Wayback URL.")
+    p.add_argument("url", metavar="URL", help="URL or pattern as CDX accepts it (andrewluxem.com, example.com/*)")
+    p.add_argument("--from", dest="from_ts", metavar="YYYYMMDD", type=_ts_arg, help="earliest timestamp")
+    p.add_argument("--to", dest="to_ts", metavar="YYYYMMDD", type=_ts_arg, help="latest timestamp")
+    p.add_argument("--limit", metavar="N", type=int, help="CDX limit (negative returns the newest rows)")
+    p.add_argument("--match", choices=("exact", "prefix", "host", "domain"), help="CDX matchType")
+    p.add_argument("--status", metavar="CODE", help="only captures with this HTTP status, e.g. 200")
+    p.add_argument("--collapse", metavar="FIELD", help="CDX collapse, e.g. digest (drops adjacent duplicates only)")
+
+    p = add("fetch", "fetch one capture raw (id_), decoded",
+            "One id_ fetch, decoded. Prints final timestamp, content-type, encoding, bytes and sha256.")
+    p.add_argument("url", metavar="URL")
+    p.add_argument("-t", "--timestamp", metavar="TS", type=_ts_arg, required=True, help="capture timestamp")
+    p.add_argument("--save", metavar="FILE", help="write the decoded body to FILE")
+
+    p = add("page", "analyse one archived page (no image downloads)",
+            "Fetch and analyse one archived page: decoded size, encoding, toolbar-injection flag, "
+            "JS-rendered verdict with reasons, image candidates by source type.")
+    p.add_argument("url", metavar="URL", help="page URL; a scheme-less input is fetched as http://")
+    capture_choice(p)
+
+    p = add("images", "recover the images of one archived page",
+            "Main workflow: fetch the page, extract and resolve image URLs, download each via id_ at the "
+            "page timestamp, run the JS-rendered fallback when needed, record everything in manifest.csv.")
+    p.add_argument("url", metavar="URL", help="page URL; a scheme-less input is fetched as http://")
+    capture_choice(p)
+    p.add_argument("--fallback", choices=("auto", "never", "always"), default="auto",
+                   help="JS-string scan plus the site's own CDX image listing: auto runs it when the page "
+                        "looks JS-rendered (default: auto)")
+    p.add_argument("--prefer-live", action="store_true",
+                   help="try each image on its live host first (1 s per-host pacing, magic-byte checked)")
+    p.add_argument("--follow-css", action="store_true",
+                   help="also fetch linked stylesheets via id_ and collect their url() images")
+    p.add_argument("--save-inline", action="store_true", help="save data: URI images instead of recording them")
+
+    p = add("site-images", "recover every archived image of a domain (CDX listing)",
+            "CDX listing of archived images for a domain and its subdomains, deduplicated by digest, "
+            "then downloaded via id_. Refused for shared CDN hosts.")
+    p.add_argument("domain", metavar="DOMAIN", help="site domain, e.g. andrewluxem.com (www. is dropped)")
+    p.add_argument("--from", dest="from_ts", metavar="YYYYMMDD", type=_ts_arg, help="earliest timestamp")
+    p.add_argument("--to", dest="to_ts", metavar="YYYYMMDD", type=_ts_arg, help="latest timestamp")
+    p.add_argument("--loose-mime", action="store_true",
+                   help="match image file extensions instead of image/* mimetypes (catches octet-stream captures)")
+    p.add_argument("--cdx-limit", metavar="N", type=_int_arg(1), default=2000,
+                   help="maximum CDX rows to read, across resume-key pages (default: 2000)")
+
+    add("verify", "re-hash saved files against manifest.csv",
+        "Re-hash every saved file in --out against the manifest; print counts by status and found_via. "
+        "Exit 5 on a modified or missing file.")
+    return parser
+
+
+def main(argv=None, *, transport=None, clock=None, sleep=None, rng=None, stdout=None, stderr=None) -> int:
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    parser = build_parser(stdout, stderr)
+    try:
+        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    except _ParserExit as e:
+        return e.status
+
+    if args.command == "verify":
+        return cmd_verify(args, stdout, stderr)
+
+    clock = clock or time.time
+    sleep = sleep or time.sleep
+    rng = rng or random.Random()
+    if transport is None:
+        try:
+            transport = UrllibTransport(cafile=args.cafile)
+        except (OSError, ssl.SSLError) as e:
+            stderr.write("error: cannot load --cafile %s: %s\n" % (args.cafile, e))
+            return EXIT_ERROR
+    try:
+        os.makedirs(args.out, exist_ok=True)
+    except OSError as e:
+        stderr.write("error: cannot create --out %s: %s\n" % (args.out, e))
+        return EXIT_ERROR
+    client = Client(
+        transport, clock=clock, sleep=sleep, rng=rng, delay=args.delay,
+        max_requests=args.max_requests, max_retries=args.max_retries, user_agent=args.user_agent,
+        log_path=os.path.join(args.out, "requests.jsonl"), record_dir=args.record,
+    )
+    run = Run(args, client, stdout, stderr, clock)
+    handler = {
+        "snapshots": cmd_snapshots,
+        "fetch": cmd_fetch,
+        "page": cmd_page,
+        "images": cmd_images,
+        "site-images": cmd_site_images,
+    }[args.command]
+    clean = False
+    try:
+        code = handler(run)
+        clean = True
+    except CapReached:
+        stderr.write("stopped: request cap (--max-requests %d) reached; rerun the same command to resume\n"
+                     % args.max_requests)
+        code, clean = EXIT_CAP, True
+    except RateLimited as e:
+        stderr.write("stopped: archive.org kept throttling (%s). Rerun the same command later; it resumes. "
+                     "Do not lower --delay.\n" % e)
+        code, clean = EXIT_RATE, True
+    except TLSError as e:
+        stderr.write(e.help_text())
+        code, clean = EXIT_TLS, True
+    except SalvageError as e:
+        stderr.write("error: %s\n" % e)
+        code, clean = EXIT_ERROR, True
+    except KeyboardInterrupt:
+        stderr.write("interrupted; manifest rows so far are saved, rerun the same command to resume\n")
+        code = 130
+    except Exception:
+        stderr.write("unexpected error:\n" + traceback.format_exc())
+        code = EXIT_ERROR
+    finally:
+        run.close(compact=clean)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

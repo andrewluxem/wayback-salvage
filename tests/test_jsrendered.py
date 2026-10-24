@@ -134,6 +134,18 @@ class TestGoogleSitesPage(unittest.TestCase):
         self.assertTrue(summary["fallback_ran"])
         self.assertEqual(len([u for u in t.calls if is_cdx(u)]), 1)
 
+    def test_no_domain_listing_when_page_is_on_a_shared_host(self):
+        page = "https://storage.googleapis.com/some-bucket/index.html"
+        t = FakeTransport().add(wb(TS, page), fixture("page_gsites"))
+        t.add(lambda u: not is_cdx(u) and u != wb(TS, page), fixture("png_red"))
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(
+                ["images", page, "-t", TS, "-o", out, "--json", "--fallback", "always"], t
+            )
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+            self.assertTrue(json.loads(stdout)["fallback_ran"])
+        self.assertFalse(any(is_cdx(u) for u in t.calls))
+
     def test_page_command_prints_verdict(self):
         t = FakeTransport().add(wb(TS, PAGE), fixture("page_gsites"))
         with tempfile.TemporaryDirectory() as out:
