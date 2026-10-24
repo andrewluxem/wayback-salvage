@@ -105,7 +105,9 @@ class TestSrcset(unittest.TestCase):
 
     def test_descriptors_and_trailing_commas(self):
         self.assertEqual(ws.parse_srcset("a.png 1x, b.png 2x"), ["a.png", "b.png"])
-        self.assertEqual(ws.parse_srcset("a.png,b.png 2x"), ["a.png", "b.png"])
+        # WHATWG: a URL is a run of non-whitespace, so an inner comma stays.
+        self.assertEqual(ws.parse_srcset("a.png,b.png 2x"), ["a.png,b.png"])
+        self.assertEqual(ws.parse_srcset("a.png, b.png 2x"), ["a.png", "b.png"])
         self.assertEqual(ws.parse_srcset("  a.png  "), ["a.png"])
         self.assertEqual(ws.parse_srcset(""), [])
         self.assertEqual(ws.parse_srcset("a.png (max-width: 1px, x) 1x, b.png"), ["a.png", "b.png"])
