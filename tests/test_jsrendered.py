@@ -19,6 +19,7 @@ from support import (
     wb,
     ws,
 )
+from make_fixtures import BACKSLASH, js_escape  # noqa: E402
 
 TS = "20240916025321"
 PAGE = "https://andrewluxem.com/"
@@ -61,16 +62,24 @@ class TestGoogleSitesPage(unittest.TestCase):
         self.assertEqual(ws.content_image_count(ex), 0)
 
     def test_js_string_scan_decodes_escapes_exactly(self):
-        ex = ws.extract(gsites_html(), PAGE)
+        html = gsites_html()
+        # Pin that the fixture really carries the escaped forms; they were
+        # once lost in transit and the test passed without them.
+        for code in ("u002f", "u003d", "u0026"):
+            self.assertIn(BACKSLASH + code, html)
+        self.assertNotIn("BBB222?authuser=0", html)
+        ex = ws.extract(html, PAGE)
         self.assertEqual(ws.scan_js_strings(ex.scripts), [JS_A, JS_B])
 
     def test_scan_hex_and_unicode_escape_forms(self):
         script = (
             r'a="https:\x2f\x2fimages.squarespace-cdn.com\x2fcontent\x2fpic?format\x3d750w";'
-            r'b="https://res.cloudinary.com/d/image/upload/w_300,h_200/s.jpg";'
-            r'c="https://example.com/not-an-image.js";'
-            r'd="https://example.com/photo.JPG?x=1&y=2";'
+            + 'b="' + js_escape("https://res.cloudinary.com/d/image/upload/w_300,h_200/s.jpg", "/", upper=True) + '";'
+            + r'c="https://example.com/not-an-image.js";'
+            + 'd="' + js_escape("https://example.com/photo.JPG?x=1&y=2", "&") + '";'
         )
+        self.assertIn(BACKSLASH + "u002F", script)
+        self.assertIn(BACKSLASH + "u0026", script)
         self.assertEqual(
             ws.scan_js_strings([script]),
             [

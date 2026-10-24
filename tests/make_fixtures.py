@@ -89,10 +89,22 @@ SIMPLE_HTML = (
     "</head><body><img src=\"/img/simple.png\" alt=\"\">" + FILLER + "</body></html>\n"
 ).encode("utf-8")
 
+BACKSLASH = chr(92)
+
+
+def js_escape(text: str, chars: str = "/=&", upper: bool = False) -> str:
+    """Write each of chars as a JavaScript backslash-u00XX escape
+    (u002f, u003d, u0026). Built at runtime because copy and editor paths
+    have twice decoded literal backslash-u text into the plain character."""
+    fmt = "u%04X" if upper else "u%04x"
+    return "".join(BACKSLASH + fmt % ord(c) if c in chars else c for c in text)
+
+
 # Google-Sites-like page: DOCS_timing and atari markers, no <img>, two
 # lh3.googleusercontent.com image URLs that exist only inside script
 # strings. The first uses JSON-escaped slashes and a literal "=w1280"; the
-# second uses / slashes, = and a & in its query.
+# second writes every /, = and & as a backslash-u00XX escape, so its query
+# carries an escaped &.
 GSITES_HTML = (
     r"""<!DOCTYPE html><html lang="en-US" itemscope itemtype="http://schema.org/WebPage"><head><meta charset="utf-8">"""
     r"""<script nonce="n1">var DOCS_timing={}; DOCS_timing['sl']=new Date().getTime();</script>"""
@@ -104,7 +116,7 @@ GSITES_HTML = (
     r"""<script src="https://www.gstatic.com/_/atari/_/js/k=atari.vw.en_US.Xw/am=MBiA/d=1/rs=AGEqA5n/m=view" nonce="n1"></script>"""
     r"""</head><body><div jscontroller="pc62j" jsaction="rcuQ6b:WYd;" class="Xpil1b"><div id="atari-page" class="UtePc">Andrew Luxem</div></div>"""
     r"""<script nonce="n1">AF_initDataCallback({key: 'ds:0', hash: '1', data:[[["https:\/\/lh3.googleusercontent.com\/sitesv\/AAA111=w1280",1280,720]],"""
-    r"""[{"src":"https://lh3.googleusercontent.com/sitesv/BBB222?authuser=0&fife=s16383"}],"""
+    + '[{"src":"' + js_escape("https://lh3.googleusercontent.com/sitesv/BBB222?authuser=0&fife=s16383") + '"}],'
     r""""https:\/\/www.gstatic.com\/atari\/embeds\/913b.js"], sideChannel: {}});</script>"""
     r"""</body></html>"""
     "\n"
