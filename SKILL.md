@@ -57,6 +57,6 @@ Read `<out>/manifest.csv`. After a run that did not exit cleanly a key can appea
 - every `type-mismatch` row (a 200 whose body was HTML or an unknown type, usually a soft 404) and every `encoding-unsupported` row (a `br` or `zstd` body with no decoder available), each with its `original_url`;
 - every `error` and `rate-limited` row with its `error` text; rerunning the same command later retries them;
 - where the files are: `<out>/images/` and `<out>/pages/`;
-- for a JS-rendered page, the host report the CLI printed, as the place to look next.
+- for a JS-rendered page, the host report the CLI printed, as the place to look next: `script_src_host` hosts serve the scripts the page loads; `script_text_host` hosts are only mentioned in inline scripts and are weaker leads.
 
 Only `ok` rows are recovered files; `duplicate` rows point at an earlier `ok` copy. For `encoding-unsupported`, installing `brotli` is the user's decision; never pip install it yourself.

@@ -137,10 +137,14 @@ class TestGoogleSitesPage(unittest.TestCase):
         for u in t.calls:
             if is_cdx(u) and "googleusercontent" in u:
                 self.assertNotIn(cdx_params(u).get("matchType"), (["domain"], ["prefix"], ["host"]))
-        hosts = dict((h, n) for h, n in summary["host_report"])
-        self.assertIn("lh3.googleusercontent.com", hosts)
-        self.assertIn("www.gstatic.com", hosts)
-        self.assertNotIn("andrewluxem.com", hosts)
+        loaded = dict((h, n) for h, n in summary["script_src_host"])
+        mentioned = dict((h, n) for h, n in summary["script_text_host"])
+        self.assertEqual(loaded, {"www.gstatic.com": 1})
+        # The inline data names www.gstatic.com too; it stays under loaded.
+        self.assertIn("lh3.googleusercontent.com", mentioned)
+        self.assertNotIn("www.gstatic.com", mentioned)
+        self.assertNotIn("andrewluxem.com", mentioned)
+        self.assertNotIn("host_report", summary)
         self.assertEqual(t.unrouted, [])
 
     def test_fallback_never(self):
@@ -288,8 +292,8 @@ class TestHostReport(unittest.TestCase):
         ex = ws.extract(self.HTML, PAGE)
         self.assertEqual(
             ws.host_report(ex, "andrewluxem.com"),
-            [("lh3.googleusercontent.com", 2), ("ads.example.com", 1),
-             ("esm.example.net", 1), ("www.gstatic.com", 1)],
+            ([("esm.example.net", 1), ("www.gstatic.com", 1)],
+             [("lh3.googleusercontent.com", 2), ("ads.example.com", 1)]),
         )
 
     def test_data_blocks_still_scanned(self):
@@ -320,10 +324,108 @@ class TestHostReport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out:
             code, stdout, stderr = run_cli(["page", PAGE, "-t", TS, "-o", out], t)
         self.assertEqual(code, ws.EXIT_OK, stderr)
-        self.assertIn("script_host.www.gstatic.com=1", stdout)
+        self.assertIn("script_src_host.www.gstatic.com=1", stdout)
+        self.assertIn("script_text_host.ads.example.com=1", stdout)
         for host in ("schema.org", "www.linkedin.com", "cdn.ldjson-example.net", "data.example.org"):
-            self.assertNotIn("script_host." + host, stdout)
+            self.assertNotIn("_host." + host, stdout)
         self.assertIn("candidate=js-string https://cdn.ldjson-example.net/brand/logo.png", stdout)
+
+
+class TestScriptHostSplit(unittest.TestCase):
+    """The host report in two: hosts of <script src> JavaScript the page
+    loads, and hosts only mentioned inside inline JavaScript. On the live
+    Next.js andrewluxem.com, the RSC flight data (self.__next_f.push, an
+    untyped inline script) repeats each ld+json block as a string, so
+    schema.org and the social profiles were still counted after the
+    ld+json exclusion."""
+
+    LOADED = [("cdn.loaded-example.net", 2), ("www.googletagmanager.com", 1)]
+    MENTIONED = [("schema.org", 2), ("www.clarity.ms", 1), ("www.linkedin.com", 1)]
+
+    def _html(self) -> str:
+        return fixture_body("page_script_hosts").decode("utf-8")
+
+    def _transport(self) -> FakeTransport:
+        t = FakeTransport().add(wb(TS, PAGE), fixture("page_script_hosts"))
+        t.add(wb(TS, "https://andrewluxem.com/hero.png"), fixture("png_red"))
+        return t
+
+    def test_fixture_has_both_kinds(self):
+        html = self._html()
+        self.assertIn('<script async src="https://www.googletagmanager.com/', html)
+        self.assertIn('var gtagSrc="https://www.googletagmanager.com/', html)  # loaded and mentioned
+        self.assertIn("self.__next_f.push(", html)
+        self.assertIn("ldjson-only.example.org", html)
+
+    def test_split(self):
+        ex = ws.extract(self._html(), PAGE)
+        self.assertEqual(ws.host_report(ex, "andrewluxem.com"), (self.LOADED, self.MENTIONED))
+
+    def test_loaded_host_is_not_also_mentioned(self):
+        html = ('<script src="https://a.example/x.js"></script>'
+                '<script>u="https://a.example/y"; v="https://b.example/z"; w="https://b.example/q"</script>')
+        ex = ws.extract(html, PAGE)
+        self.assertEqual(ws.host_report(ex, "andrewluxem.com"), ([("a.example", 1)], [("b.example", 2)]))
+
+    def test_data_block_hosts_in_neither(self):
+        loaded, mentioned = ws.host_report(ws.extract(self._html(), PAGE), "andrewluxem.com")
+        hosts = {h for h, _ in loaded + mentioned}
+        self.assertNotIn("ldjson-only.example.org", hosts)
+        self.assertNotIn("www.andrewluxem.com", hosts)
+
+    def test_page_command_prints_loaded_hosts_first(self):
+        t = self._transport()
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(["page", PAGE, "-t", TS, "-o", out], t)
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+            code, jout, stderr = run_cli(["page", PAGE, "-t", TS, "-o", out, "--json"], t)
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+        lines = [ln for ln in stdout.splitlines() if "_host." in ln]
+        self.assertEqual(lines, ["script_src_host.%s=%d" % kv for kv in self.LOADED]
+                         + ["script_text_host.%s=%d" % kv for kv in self.MENTIONED])
+        self.assertNotIn("script_host.", stdout)
+        d = json.loads(jout)
+        self.assertEqual(d["script_src_host"], [list(kv) for kv in self.LOADED])
+        self.assertEqual(d["script_text_host"], [list(kv) for kv in self.MENTIONED])
+        self.assertNotIn("host_report", d)
+
+    def test_images_summary_and_progress_line(self):
+        t = self._transport()
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(["images", PAGE, "-t", TS, "-o", out], t)
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+            code, jout, _ = run_cli(["images", PAGE, "-t", TS, "-o", out, "--json", "--quiet"], t)
+            self.assertEqual(code, ws.EXIT_OK)
+        self.assertIn(
+            "third-party script hosts loaded: cdn.loaded-example.net 2, www.googletagmanager.com 1; "
+            "only mentioned in inline scripts: schema.org 2, www.clarity.ms 1, www.linkedin.com 1\n",
+            stderr,
+        )
+        lines = [ln for ln in stdout.splitlines() if "_host." in ln]
+        self.assertEqual(lines, ["script_src_host.%s=%d" % kv for kv in self.LOADED]
+                         + ["script_text_host.%s=%d" % kv for kv in self.MENTIONED])
+        summary = json.loads(jout)
+        self.assertEqual(summary["script_src_host"], [list(kv) for kv in self.LOADED])
+        self.assertEqual(summary["script_text_host"], [list(kv) for kv in self.MENTIONED])
+        self.assertNotIn("host_report", summary)
+
+    def test_progress_line_with_one_kind_missing(self):
+        html = '<html><body><img src="/a.png"><script>v="https://b.example/z"</script></body></html>'
+        t = FakeTransport().add(wb(TS, PAGE), resp(200, {"Content-Type": "text/html"}, html.encode()))
+        t.add(wb(TS, "https://andrewluxem.com/a.png"), fixture("png_red"))
+        with tempfile.TemporaryDirectory() as out:
+            code, _, stderr = run_cli(["images", PAGE, "-t", TS, "-o", out], t)
+        self.assertEqual(code, ws.EXIT_OK, stderr)
+        self.assertIn("third-party script hosts loaded: none; only mentioned in inline scripts: b.example 1\n",
+                      stderr)
+
+    def test_no_progress_line_without_hosts(self):
+        t = FakeTransport().add(wb(TS, PAGE), fixture("page_plain"))
+        t.add(wb(TS, "https://andrewluxem.com/img/simple.png"), fixture("png_red"))
+        with tempfile.TemporaryDirectory() as out:
+            code, _, stderr = run_cli(["images", PAGE, "-t", TS, "-o", out], t)
+        self.assertEqual(code, ws.EXIT_OK, stderr)
+        self.assertNotIn("script hosts", stderr)
 
 
 class TestListingWindow(unittest.TestCase):

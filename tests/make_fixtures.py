@@ -140,6 +140,39 @@ GSITES_IMG_HTML = (
     "\n"
 ).encode("utf-8")
 
+# Next.js-like page with both kinds of script host. Loaded through <script
+# src>: two scripts from cdn.loaded-example.net, gtag from
+# www.googletagmanager.com, and the site's own chunk. Only mentioned in
+# inline JavaScript: www.clarity.ms (a loader snippet), and schema.org and
+# www.linkedin.com in the RSC flight data (self.__next_f.push), which
+# repeats the ld+json block as a string, as on the live andrewluxem.com.
+# The gtag snippet names www.googletagmanager.com again, and the ld+json
+# block alone names ldjson-only.example.org.
+PAGE_SCRIPT_HOSTS_HTML = (
+    r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Andrew Luxem</title>"""
+    r"""<script src="/_next/static/chunks/main-app.js" async></script>"""
+    r"""<script async src="https://www.googletagmanager.com/gtag/js?id=G-TEST0001"></script>"""
+    r"""<script src="https://cdn.loaded-example.net/lib/a.js"></script>"""
+    r"""<script type="module" src="https://cdn.loaded-example.net/lib/b.mjs"></script>"""
+    r"""<script type="application/ld+json">{"@context":"https://schema.org","@type":"Person","""
+    r""""url":"https://www.andrewluxem.com","sameAs":["https://www.linkedin.com/in/example","""
+    r""""https://ldjson-only.example.org/profile"]}</script>"""
+    r"""<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}"""
+    r"""gtag('js',new Date());gtag('config','G-TEST0001');"""
+    r"""var gtagSrc="https://www.googletagmanager.com/gtag/js?id=G-TEST0001";</script>"""
+    r"""<script>(function(c,l,a,r,i,t,y){t=l.createElement(r);t.async=1;"""
+    r"""t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];"""
+    r"""y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","abc123");</script>"""
+    r"""</head><body><main><h1>Andrew Luxem</h1><img src="/hero.png" alt="">"""
+    + FILLER
+    + r"""</main><script>self.__next_f.push([1,"[{\"@context\":\"https://schema.org\","""
+    r"""\"@type\":\"Person\",\"url\":\"https://www.andrewluxem.com\","""
+    r"""\"sameAs\":[\"https://www.linkedin.com/in/example\"]},"""
+    r"""{\"@context\":\"https://schema.org\",\"@type\":\"ProfilePage\"}]"])</script>"""
+    r"""</body></html>"""
+    "\n"
+).encode("utf-8")
+
 # Classic static page covering every source type in spec 3.5. The page URL
 # used by the tests is https://example.com/blog/2020/post.html and the
 # <base href> moves relative resolution to https://example.com/assets/.
@@ -340,6 +373,8 @@ def fixtures() -> dict:
         ),
         # Script scan without a JS-rendered verdict.
         "page_gsites_img": (200, html_meta, GSITES_IMG_HTML),
+        # Host report: loaded script hosts apart from mentioned ones.
+        "page_script_hosts": (200, html_meta, PAGE_SCRIPT_HOSTS_HTML),
         # Case 6: classic page.
         "page_classic": (200, html_meta, CLASSIC_HTML),
         # Case 11: toolbar markers.

@@ -1208,21 +1208,33 @@ def scan_js_strings(texts) -> list:
     return found
 
 
-def host_report(ex: Extraction, page_host: str) -> list:
-    """Third-party hosts referenced by JavaScript, most frequent first.
-    ld+json and other data blocks are left out: they name schema.org and
-    social profiles, not where the page loads things from."""
+def host_report(ex: Extraction, page_host: str) -> tuple:
+    """(loaded, mentioned): third-party hosts of the <script src>
+    JavaScript the page loads, and hosts only mentioned inside inline
+    JavaScript, each most frequent first. A loaded host is not listed again
+    as mentioned. ld+json and other data blocks are left out: they name
+    schema.org and social profiles, not where the page loads things from.
+    Inline copies of them (Next.js flight data) still count as mentioned."""
     own = own_domain(page_host)
-    counts = collections.Counter()
-    for url in ex.script_srcs + _script_urls(ex.js_scripts):
-        try:
-            host = (urllib.parse.urlsplit(unwrap_wayback(url)).hostname or "").lower()
-        except ValueError:
-            continue
-        if not host or is_archive_host(host) or host == own or host.endswith("." + own):
-            continue
-        counts[host] += 1
-    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def count(urls):
+        counts = collections.Counter()
+        for url in urls:
+            try:
+                host = (urllib.parse.urlsplit(unwrap_wayback(url)).hostname or "").lower()
+            except ValueError:
+                continue
+            if not host or is_archive_host(host) or host == own or host.endswith("." + own):
+                continue
+            counts[host] += 1
+        return counts
+
+    def ranked(counts):
+        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    loaded = count(ex.script_srcs)
+    mentioned = count(_script_urls(ex.js_scripts))
+    return ranked(loaded), ranked({h: n for h, n in mentioned.items() if h not in loaded})
 
 
 # ------------------------------------------------------ files and naming
@@ -1667,7 +1679,8 @@ class PageResult:
         self.content_images = 0
         self.extraction = None
         self.js_strings = []
-        self.host_report = []
+        self.script_src_hosts = []
+        self.script_text_hosts = []
         self.saved_path = ""
         self.sha256 = ""
         self.error = ""
@@ -1705,7 +1718,8 @@ class PageResult:
             "content_images": self.content_images,
             "candidates": [{"url": _short_uri(u), "found_via": v} for u, v in cands],
             "found_via": dict(collections.Counter(v for _, v in cands)),
-            "host_report": [list(kv) for kv in self.host_report],
+            "script_src_host": [list(kv) for kv in self.script_src_hosts],
+            "script_text_host": [list(kv) for kv in self.script_text_hosts],
             "saved_path": self.saved_path,
             "error": self.error,
         }
@@ -1802,7 +1816,7 @@ def _decode_page(run: Run, pr: PageResult, resp: Response, original: str) -> Non
     pr.js_rendered, pr.js_reasons = js_verdict(ex, text)
     pr.content_images = content_image_count(ex)
     pr.js_strings = scan_js_strings(ex.scripts)
-    pr.host_report = host_report(ex, urllib.parse.urlsplit(pr.base_url).hostname or "")
+    pr.script_src_hosts, pr.script_text_hosts = host_report(ex, urllib.parse.urlsplit(pr.base_url).hostname or "")
     if dec.status == "encoding-mismatch":
         pr.status = "encoding-mismatch"
         pr.error = "Content-Encoding %s did not decode; raw bytes kept" % dec.encoding
@@ -2046,6 +2060,9 @@ def process_items(run: Run, items: list) -> collections.Counter:
 
 # --------------------------------------------------------------- commands
 
+# The host report's output keys, loaded hosts first.
+HOST_KEYS = ("script_src_host", "script_text_host")
+
 
 def _fmt(value) -> str:
     if isinstance(value, bool):
@@ -2143,8 +2160,9 @@ def _print_page(run: Run, pr: PageResult) -> None:
     run.say("candidates=%d" % len(d["candidates"]))
     for via, n in sorted(d["found_via"].items()):
         run.say("found_via.%s=%d" % (via, n))
-    for host, n in d["host_report"]:
-        run.say("script_host.%s=%d" % (host, n))
+    for k in HOST_KEYS:
+        for host, n in d[k]:
+            run.say("%s.%s=%d" % (k, host, n))
     for c in d["candidates"]:
         run.say("candidate=%s %s" % (c["found_via"], c["url"]))
 
@@ -2164,9 +2182,9 @@ def _print_summary(run: Run, summary: dict) -> None:
         if isinstance(v, dict):
             for sub, n in sorted(v.items()):
                 run.say("%s.%s=%s" % (k, sub, _fmt(n)))
-        elif k == "host_report":
+        elif k in HOST_KEYS:
             for host, n in v:
-                run.say("script_host.%s=%d" % (host, n))
+                run.say("%s.%s=%d" % (k, host, n))
         elif v is not None:
             run.say("%s=%s" % (k, _fmt(v)))
 
@@ -2210,8 +2228,10 @@ def cmd_images(run: Run) -> int:
                     items.append(it)
     found_via = dict(collections.Counter(i.found_via for i in items))
     run.info("candidates: %d (%s)" % (len(items), ", ".join("%s %d" % kv for kv in sorted(found_via.items())) or "none"))
-    if pr.host_report:
-        run.info("third-party script hosts: " + ", ".join("%s %d" % kv for kv in pr.host_report))
+    if pr.script_src_hosts or pr.script_text_hosts:
+        run.info("third-party script hosts loaded: %s; only mentioned in inline scripts: %s"
+                 % tuple(", ".join("%s %d" % kv for kv in hosts) or "none"
+                         for hosts in (pr.script_src_hosts, pr.script_text_hosts)))
     statuses = process_items(run, items)
     _print_summary(run, {
         "page": pr.base_url,
@@ -2230,7 +2250,8 @@ def cmd_images(run: Run) -> int:
         "dry_run": bool(a.dry_run),
         "candidates": len(items),
         "found_via": found_via,
-        "host_report": [list(kv) for kv in pr.host_report],
+        "script_src_host": [list(kv) for kv in pr.script_src_hosts],
+        "script_text_host": [list(kv) for kv in pr.script_text_hosts],
         "status": dict(statuses),
         "requests": run.client.count,
         "exit_code": run.exit_code,
