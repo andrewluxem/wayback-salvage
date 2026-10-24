@@ -118,7 +118,8 @@ class CapReached(Exception):
 
 
 class RateLimited(Exception):
-    """Retries exhausted on 429/502/503/504 or resets (exit 3, resumable)."""
+    """Retries exhausted on 429/502/503/504, resets or outage responses
+    (exit 3, resumable)."""
 
     def __init__(self, url: str, last: str):
         super().__init__("%s (last: %s)" % (url, last))
@@ -525,8 +526,10 @@ class Client:
             lim = self.live_limiters[host] = Limiter(LIVE_DELAY, self.clock, self.sleep, self.rng)
         return lim
 
-    def request(self, url: str, live: bool = False) -> Response:
-        """One request with retries. Live requests are not retried."""
+    def request(self, url: str, live: bool = False, validate=None) -> Response:
+        """One request with retries. Live requests are not retried. From
+        archive.org, the outage page counts as a 503 whatever its status,
+        and validate(resp) may return another reason to retry like one."""
         host = (urllib.parse.urlsplit(url).hostname or "").lower()
         limiter = self._limiter_for(host)
         attempt = 0
@@ -557,11 +560,20 @@ class Client:
             else:
                 self._log(started, url, resp.status, len(resp.body), waited, attempt)
                 self._record(url, resp)
-                if resp.status not in RETRY_STATUSES or live:
-                    return resp
-                if resp.status == 429:
-                    limiter.note_429()
-                last = "HTTP %d" % resp.status
+                problem = None
+                if not live and is_archive_host(host):
+                    if is_offline_page(resp):
+                        problem = "archive.org Temporarily Offline page (HTTP %d)" % resp.status
+                    elif validate is not None:
+                        problem = validate(resp)
+                if problem:
+                    last = problem
+                else:
+                    if resp.status not in RETRY_STATUSES or live:
+                        return resp
+                    if resp.status == 429:
+                        limiter.note_429()
+                    last = "HTTP %d" % resp.status
             if attempt >= self.max_retries:
                 raise RateLimited(url, last)
             backoff = self._backoff(attempt, resp)
@@ -576,12 +588,12 @@ class Client:
                 wait = max(wait, retry_after)
         return min(wait + self.rng.random(), BACKOFF_CAP)
 
-    def get(self, url: str, live: bool = False) -> Fetched:
+    def get(self, url: str, live: bool = False, validate=None) -> Fetched:
         """GET following up to MAX_HOPS redirects, each a counted request."""
         hops = []
         current = url
         while True:
-            resp = self.request(current, live=live)
+            resp = self.request(current, live=live, validate=validate)
             hops.append(current)
             location = resp.header("location")
             if resp.status in REDIRECT_STATUSES and location:
@@ -728,6 +740,17 @@ def is_toolbar_injected(text: str) -> bool:
     """An id_ body carrying Wayback's replay toolbar: the id_ was lost.
     A bare 'wombat' is not enough, an archived page can mention one."""
     return "web-static.archive.org" in text or ("__wm." in text and "wombat" in text.lower())
+
+
+# archive.org's outage page. Matched in <title> only, so an archived page
+# that says "temporarily offline" in its text is not taken for it.
+_OFFLINE_TITLE_RE = re.compile(rb"<title[^>]*>[^<]*Temporarily\s+Offline", re.I)
+OFFLINE_SCAN_BYTES = 65536
+
+
+def is_offline_page(resp) -> bool:
+    dec = decode_body(resp.body, resp.header("content-encoding"), sniff=True)
+    return bool(_OFFLINE_TITLE_RE.search(dec.data[:OFFLINE_SCAN_BYTES]))
 
 
 _HEIF_BRANDS = (b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1")
@@ -1494,8 +1517,25 @@ class Run:
                 self._manifest.close()
 
 
+def cdx_body_problem(resp: Response):
+    """Retry reason for a 200 CDX response whose body is not JSON (an error
+    or outage page in place of results), else None. An empty body is a
+    valid "no captures"; other statuses are left to cdx_request."""
+    if resp.status != 200:
+        return None
+    dec = decode_body(resp.body, resp.header("content-encoding"), sniff=True)
+    text = dec.data.decode("utf-8", "replace").strip()
+    if not text:
+        return None
+    try:
+        json.loads(text)
+    except ValueError:
+        return "CDX body is not JSON: %s" % " ".join(text[:120].split())
+    return None
+
+
 def cdx_request(run: Run, url: str) -> CdxPage:
-    fetched = run.client.get(url)
+    fetched = run.client.get(url, validate=cdx_body_problem)
     resp = fetched.response
     if resp.status != 200:
         snippet = " ".join(resp.body[:200].decode("utf-8", "replace").split())
@@ -1827,12 +1867,10 @@ def follow_css(run: Run, pr: PageResult) -> list:
 
 
 def nearest_capture(run: Run, item: Item):
-    """After a 404 on the direct id_ request: one exact-URL CDX lookup."""
+    """After a 404 on the direct id_ request: one exact-URL CDX lookup.
+    CdxError propagates: a failed lookup is not proof of no capture."""
     query = build_cdx_query(item.url, filters=["statuscode:200"], collapse="digest", limit=200)
-    try:
-        rows = cdx_request(run, query).rows
-    except CdxError:
-        return None
+    rows = cdx_request(run, query).rows
     if not rows:
         return None
 
@@ -1956,7 +1994,12 @@ def handle_item(run: Run, item: Item) -> dict:
             return row
     fetched = run.client.get(target)
     if fetched.response.status == 404 and item.found_via != "cdx-listing" and not fetched.too_many_redirects:
-        alt = nearest_capture(run, item)
+        try:
+            alt = nearest_capture(run, item)
+        except CdxError as e:
+            # error, not not-archived, so a rerun tries the lookup again.
+            return run.row(dict(base, status="error", wayback_url=fetched.final_url,
+                                error="CDX lookup failed: %s" % e))
         if alt is not None:
             fetched = run.client.get(wayback_url(alt[0], alt[1]))
     return _image_row(run, item, base, fetched, "wayback")
@@ -1989,7 +2032,7 @@ def process_items(run: Run, items: list) -> collections.Counter:
                      "kind": "image", "found_via": item.found_via, "cdx_digest": item.digest,
                      "status": "rate-limited", "error": str(e)})
             statuses["rate-limited"] += 1
-            run.info("archive.org kept throttling (%s). Stopped; rerun the same command later "
+            run.info("archive.org kept throttling or failing (%s). Stopped; rerun the same command later "
                      "(it resumes) rather than lowering --delay." % e)
             run.exit_code = EXIT_RATE
             break
@@ -2277,7 +2320,8 @@ exit codes:
   0  done
   1  usage or unexpected error
   2  --max-requests reached (resumable: rerun the same command)
-  3  stopped on sustained 429/503 (resumable: rerun later, do not lower --delay)
+  3  stopped on sustained 429/503 or an archive.org outage (resumable: rerun
+     later, do not lower --delay)
   4  TLS verification failed (the message names the fix)
   5  verify found a modified or missing file
 """
@@ -2349,7 +2393,7 @@ def build_parser(stdout, stderr) -> argparse.ArgumentParser:
     g.add_argument("-n", "--max-requests", metavar="N", type=_int_arg(1), default=300,
                    help="stop after N HTTP requests, redirect hops included; exit 2, resumable (default: 300)")
     g.add_argument("--max-retries", metavar="N", type=_int_arg(0), default=4,
-                   help="retries on 429/502/503/504 and resets before exit 3 (default: 4)")
+                   help="retries on 429/502/503/504, resets and outage pages before exit 3 (default: 4)")
     g.add_argument("--user-agent", metavar="STR", default=DEFAULT_UA, help="User-Agent header (default: %(default)s)")
     g.add_argument("--cafile", metavar="PATH", help="CA bundle for TLS verification (verification is never disabled)")
     g.add_argument("--dry-run", action="store_true",
@@ -2484,7 +2528,7 @@ def main(argv=None, *, transport=None, clock=None, sleep=None, rng=None, stdout=
                      % args.max_requests)
         code, clean = EXIT_CAP, True
     except RateLimited as e:
-        stderr.write("stopped: archive.org kept throttling (%s). Rerun the same command later; it resumes. "
+        stderr.write("stopped: archive.org kept throttling or failing (%s). Rerun the same command later; it resumes. "
                      "Do not lower --delay.\n" % e)
         code, clean = EXIT_RATE, True
     except TLSError as e:

@@ -262,6 +262,15 @@ PAGE_INLINE_HTML = (
 
 SOFT_404_HTML = b"<!DOCTYPE html><html><body><h1>Not Found</h1></body></html>\n"
 
+# Synthetic stand-in for archive.org's outage page; only the <title> text
+# matters to the CLI. Served as a 200, the status that turned it into
+# type-mismatch; tests reuse the body with other statuses.
+ARCHIVE_OFFLINE_HTML = (
+    b"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Temporarily Offline</title></head>"
+    b"<body><h1>Temporarily Offline</h1><p>Internet Archive services are temporarily offline. "
+    b"Please check back later.</p></body></html>\n"
+)
+
 
 def fixtures() -> dict:
     snapshot_header = ["original", "timestamp", "mimetype", "statuscode", "digest", "length"]
@@ -347,6 +356,8 @@ def fixtures() -> dict:
         "site_css": (200, {"Content-Type": "text/css"}, SITE_CSS),
         "page_inline": (200, html_meta, PAGE_INLINE_HTML),
         "soft_404": (200, html_meta, SOFT_404_HTML),
+        # Outage safety.
+        "archive_offline": (200, html_meta, ARCHIVE_OFFLINE_HTML),
         "png_red": (200, png_meta, png(2, 2, (255, 0, 0))),
         "png_green": (200, png_meta, png(2, 2, (0, 255, 0))),
         "png_blue": (200, png_meta, png(2, 2, (0, 0, 255))),
