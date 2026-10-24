@@ -794,6 +794,20 @@ NON_IMAGE_EXTS = frozenset(("woff", "woff2", "ttf", "otf", "eot", "css", "js", "
 # verdict. Icons, meta images and CSS backgrounds do not.
 CONTENT_VIA = ("img:", "picture-source:", "source:", "input-image:", "video:", "svg-image:", "link:preload")
 HIDDEN_TEXT_TAGS = frozenset(("noscript", "template", "title"))
+# <script type> values a browser runs as JavaScript ("" stands for an absent
+# or empty type). Anything else (ld+json, templates, importmap) is data.
+JS_SCRIPT_TYPES = frozenset((
+    "", "module", "text/javascript", "application/javascript", "text/ecmascript",
+    "application/ecmascript", "application/x-javascript", "application/x-ecmascript",
+    "text/x-javascript", "text/x-ecmascript", "text/jscript", "text/livescript",
+    "text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+    "text/javascript1.3", "text/javascript1.4", "text/javascript1.5",
+))
+
+
+def is_js_script_type(value) -> bool:
+    """Lenient about case, whitespace and parameters (charset=...)."""
+    return (value or "").split(";", 1)[0].strip().lower() in JS_SCRIPT_TYPES
 
 _CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""", re.I)
 
@@ -860,8 +874,9 @@ class Extraction:
     def __init__(self):
         self.candidates = []
         self.base_url = ""
-        self.scripts = []
-        self.script_srcs = []
+        self.scripts = []  # every inline script, data blocks included
+        self.js_scripts = []  # the inline scripts that are JavaScript
+        self.script_srcs = []  # external JavaScript only
         self.stylesheets = []
         self.visible_text_chars = 0
         self.script_bytes = 0
@@ -876,8 +891,10 @@ class _Collector(html.parser.HTMLParser):
         self.picture_depth = 0
         self.hidden_depth = 0
         self.script_buf = None
+        self.script_is_js = True
         self.style_buf = None
         self.scripts = []
+        self.js_scripts = []
         self.script_srcs = []
         self.stylesheet_hrefs = []
         self.text = []
@@ -953,7 +970,8 @@ class _Collector(html.parser.HTMLParser):
             if self.base_href is None and a.get("href"):
                 self.base_href = a["href"]
         elif tag == "script":
-            if a.get("src"):
+            self.script_is_js = is_js_script_type(a.get("type"))
+            if a.get("src") and self.script_is_js:
                 self.script_srcs.append(a["src"])
             self.script_bytes += len(self.get_starttag_text() or "")
             self.script_buf = []
@@ -977,6 +995,8 @@ class _Collector(html.parser.HTMLParser):
         self.script_buf = None
         if text.strip():
             self.scripts.append(text)
+            if self.script_is_js:
+                self.js_scripts.append(text)
         self.script_bytes += len(text)
 
     def _finish_style(self):
@@ -1066,6 +1086,7 @@ def extract(html_text: str, page_url: str) -> Extraction:
         if r and not r[1]:
             ex.stylesheets.append(r[0])
     ex.scripts = p.scripts
+    ex.js_scripts = p.js_scripts
     ex.visible_text_chars = len(" ".join(" ".join(p.text).split()))
     ex.script_bytes = p.script_bytes
     ex.doc_bytes = len(html_text)
@@ -1165,10 +1186,12 @@ def scan_js_strings(texts) -> list:
 
 
 def host_report(ex: Extraction, page_host: str) -> list:
-    """Third-party hosts referenced by scripts, most frequent first."""
+    """Third-party hosts referenced by JavaScript, most frequent first.
+    ld+json and other data blocks are left out: they name schema.org and
+    social profiles, not where the page loads things from."""
     own = own_domain(page_host)
     counts = collections.Counter()
-    for url in ex.script_srcs + _script_urls(ex.scripts):
+    for url in ex.script_srcs + _script_urls(ex.js_scripts):
         try:
             host = (urllib.parse.urlsplit(unwrap_wayback(url)).hostname or "").lower()
         except ValueError:

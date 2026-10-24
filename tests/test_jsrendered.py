@@ -15,6 +15,7 @@ from support import (
     fixture_body,
     is_cdx,
     read_manifest,
+    resp,
     run_cli,
     wb,
     ws,
@@ -191,6 +192,68 @@ class TestGoogleSitesPage(unittest.TestCase):
         self.assertIn("content_encoding=gzip", stdout)
         # page never downloads images or runs the fallback listing
         self.assertEqual(t.calls, [wb(TS, PAGE)])
+
+
+class TestHostReport(unittest.TestCase):
+    """ld+json, templates and other non-JavaScript script types stay out of
+    the host report, but the JS-string scan still reads them."""
+
+    HTML = (
+        '<html><head>'
+        '<script type="application/ld+json">{"@context":"https://schema.org","@type":"Person",'
+        '"sameAs":["https://www.linkedin.com/in/example"],'
+        '"image":"https://cdn.ldjson-example.net/brand/logo.png"}</script>'
+        '<script type="text/x-template"><a href="https://templates.example.org/card.png"></a></script>'
+        '<script type="importmap">{"imports":{"app":"https://modules.example.org/app.js"}}</script>'
+        '<script type="application/ld+json" src="https://data.example.org/site.json"></script>'
+        '<script src="https://www.gstatic.com/a.js"></script>'
+        '<script type="module" src="https://esm.example.net/m.js"></script>'
+        '<script type="text/javascript; charset=utf-8">x="https://lh3.googleusercontent.com/sitesv/CCC333=w1280"</script>'
+        '<script>y="https://ads.example.com/pixel.gif"</script>'
+        '<SCRIPT TYPE=" Text/JavaScript ">z="https://lh3.googleusercontent.com/z.png"</SCRIPT>'
+        '</head><body><p>' + "Ordinary visible text. " * 12 + '</p></body></html>'
+    )
+
+    def test_data_blocks_excluded(self):
+        ex = ws.extract(self.HTML, PAGE)
+        self.assertEqual(
+            ws.host_report(ex, "andrewluxem.com"),
+            [("lh3.googleusercontent.com", 2), ("ads.example.com", 1),
+             ("esm.example.net", 1), ("www.gstatic.com", 1)],
+        )
+
+    def test_data_blocks_still_scanned(self):
+        ex = ws.extract(self.HTML, PAGE)
+        self.assertEqual(
+            ws.scan_js_strings(ex.scripts),
+            [
+                "https://cdn.ldjson-example.net/brand/logo.png",
+                "https://templates.example.org/card.png",
+                "https://lh3.googleusercontent.com/sitesv/CCC333=w1280",
+                "https://ads.example.com/pixel.gif",
+                "https://lh3.googleusercontent.com/z.png",
+            ],
+        )
+
+    def test_script_types(self):
+        for value in (None, "", "module", "text/javascript", " TEXT/JAVASCRIPT ",
+                      "text/javascript; charset=utf-8", "application/javascript", "text/ecmascript"):
+            with self.subTest(value=value):
+                self.assertTrue(ws.is_js_script_type(value))
+        for value in ("application/ld+json", "application/json", "text/template", "text/x-template",
+                      "importmap", "speculationrules", "text/html", "text/plain"):
+            with self.subTest(value=value):
+                self.assertFalse(ws.is_js_script_type(value))
+
+    def test_page_command_reports_js_hosts_and_scans_data_blocks(self):
+        t = FakeTransport().add(wb(TS, PAGE), resp(200, {"Content-Type": "text/html"}, self.HTML.encode()))
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(["page", PAGE, "-t", TS, "-o", out], t)
+        self.assertEqual(code, ws.EXIT_OK, stderr)
+        self.assertIn("script_host.www.gstatic.com=1", stdout)
+        for host in ("schema.org", "www.linkedin.com", "cdn.ldjson-example.net", "data.example.org"):
+            self.assertNotIn("script_host." + host, stdout)
+        self.assertIn("candidate=js-string https://cdn.ldjson-example.net/brand/logo.png", stdout)
 
 
 class TestListingWindow(unittest.TestCase):
