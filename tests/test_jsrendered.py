@@ -194,6 +194,76 @@ class TestGoogleSitesPage(unittest.TestCase):
         self.assertEqual(t.calls, [wb(TS, PAGE)])
 
 
+class TestScanWithoutJsRenderedVerdict(unittest.TestCase):
+    """--fallback auto runs the JS-string scan whenever js_reasons is
+    non-empty, content images or not; the domain listing still needs
+    js_rendered."""
+
+    IMG = "https://lh3.googleusercontent.com/sitesv/IMG000=w400"
+    JS_D = "https://lh3.googleusercontent.com/sitesv/DDD444=w1280"
+    JS_E = "https://lh3.googleusercontent.com/sitesv/EEE555=w1280"
+
+    def _transport(self, page_fixture=None):
+        t = FakeTransport()
+        t.add(wb(TS, PAGE), page_fixture or fixture("page_gsites_img"))
+        t.add(wb(TS, self.IMG), fixture("png_red"))
+        t.add(wb(TS, self.JS_D), fixture("png_green"))
+        t.add(wb(TS, self.JS_E), fixture("png_blue"))
+        return t
+
+    def test_auto_scans_scripts_when_reasons_exist(self):
+        t = self._transport()
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(["images", PAGE, "-t", TS, "-o", out, "--json", "--quiet"], t)
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+            rows = {r["original_url"]: r for r in read_manifest(out)}
+        summary = json.loads(stdout)
+        self.assertFalse(summary["js_rendered"])
+        self.assertIn("marker:DOCS_timing", summary["js_reasons"])
+        self.assertTrue(summary["js_scan_ran"])
+        self.assertFalse(summary["listing_ran"])
+        self.assertTrue(summary["fallback_ran"])  # the scan is part of the fallback
+        self.assertEqual(rows[self.IMG]["found_via"], "img:src")
+        for url in (self.JS_D, self.JS_E):
+            self.assertEqual((rows[url]["found_via"], rows[url]["status"]), ("js-string", "ok"))
+        self.assertFalse(any(is_cdx(u) for u in t.calls))
+        self.assertEqual(t.unrouted, [])
+
+    def test_auto_skips_scan_without_reasons(self):
+        html = ('<html><body><img src="%s">' % self.IMG + "<p>" + "Plain static text. " * 20 + "</p>"
+                + '<script>x="%s"</script></body></html>' % self.JS_D)
+        t = self._transport(resp(200, {"Content-Type": "text/html"}, html.encode()))
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(["images", PAGE, "-t", TS, "-o", out, "--json", "--quiet"], t)
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+            vias = {r["found_via"] for r in read_manifest(out)}
+        summary = json.loads(stdout)
+        self.assertEqual(summary["js_reasons"], [])
+        self.assertFalse(summary["js_scan_ran"])
+        self.assertFalse(summary["fallback_ran"])
+        self.assertNotIn("js-string", vias)
+        self.assertEqual(t.count(wb(TS, self.JS_D)), 0)
+
+    def test_never_skips_scan(self):
+        t = self._transport()
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(
+                ["images", PAGE, "-t", TS, "-o", out, "--json", "--quiet", "--fallback", "never"], t
+            )
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+        self.assertFalse(json.loads(stdout)["js_scan_ran"])
+        self.assertEqual(t.calls, [wb(TS, PAGE), wb(TS, self.IMG)])
+
+    def test_page_lists_the_same_js_string_candidates(self):
+        t = self._transport()
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(["page", PAGE, "-t", TS, "-o", out], t)
+        self.assertEqual(code, ws.EXIT_OK, stderr)
+        self.assertIn("js_rendered=false", stdout)
+        self.assertIn("found_via.js-string=2", stdout)
+        self.assertIn("candidate=js-string " + self.JS_D, stdout)
+
+
 class TestHostReport(unittest.TestCase):
     """ld+json, templates and other non-JavaScript script types stay out of
     the host report, but the JS-string scan still reads them."""

@@ -1637,7 +1637,7 @@ class PageResult:
         if self.extraction is None:
             return []
         out = [(c.url, c.found_via) for c in self.extraction.candidates]
-        if self.js_rendered:
+        if self.js_reasons:  # what images --fallback auto would scan
             known = {u for u, _ in out}
             out += [(u, "js-string") for u in self.js_strings if u not in known]
         return out
@@ -2137,14 +2137,18 @@ def cmd_images(run: Run) -> int:
         items = [Item(c.url, pr.timestamp, c.found_via, inline=c.inline) for c in pr.extraction.candidates]
         if a.follow_css:
             items += follow_css(run, pr)
-    fallback = a.fallback == "always" or (a.fallback == "auto" and pr.js_rendered)
+    # auto: the script scan on any sign of script building, even beside
+    # content images; the domain listing only for a JS-rendered verdict.
+    scan = a.fallback == "always" or (a.fallback == "auto" and bool(pr.js_reasons))
+    listing = a.fallback == "always" or (a.fallback == "auto" and pr.js_rendered)
     window = None
-    if fallback:
-        known = {i.url for i in items}
+    known = {i.url for i in items}
+    if scan:
         for url in pr.js_strings:
             if url not in known:
                 known.add(url)
                 items.append(Item(url, pr.timestamp, "js-string"))
+    if listing:
         domain = own_domain(urllib.parse.urlsplit(pr.base_url).hostname or "")
         if not domain or is_shared_host(domain):
             run.info("fallback: no CDX listing for %s (shared or empty host)" % (domain or "?"))
@@ -2176,7 +2180,8 @@ def cmd_images(run: Run) -> int:
         "toolbar_injected": pr.toolbar_injected,
         "js_rendered": pr.js_rendered,
         "js_reasons": pr.js_reasons,
-        "fallback_ran": fallback,
+        "fallback_ran": scan or listing,
+        "js_scan_ran": scan,
         "listing_ran": window is not None,
         "listing_window": {"from": window[0], "to": window[1]} if window else None,
         "dry_run": bool(a.dry_run),
@@ -2401,8 +2406,9 @@ def build_parser(stdout, stderr) -> argparse.ArgumentParser:
     p.add_argument("url", metavar="URL", help="page URL; a scheme-less input is fetched as http://")
     capture_choice(p)
     p.add_argument("--fallback", choices=("auto", "never", "always"), default="auto",
-                   help="JS-string scan plus the site's own CDX image listing: auto runs it when the page "
-                        "looks JS-rendered (default: auto)")
+                   help="JS-string scan plus the site's own CDX image listing: auto runs the scan when the "
+                        "page shows any JS-rendered sign and the listing when it looks JS-rendered "
+                        "(default: auto)")
     p.add_argument("--from", dest="from_ts", metavar="YYYYMMDD", type=_ts_arg,
                    help="earliest capture for the fallback's domain listing (default: page capture - 365 days)")
     p.add_argument("--to", dest="to_ts", metavar="YYYYMMDD", type=_ts_arg,

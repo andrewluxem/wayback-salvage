@@ -124,6 +124,22 @@ GSITES_HTML = (
     "\n"
 ).encode("utf-8")
 
+# Google-Sites-like page with one content <img>, so it is not judged
+# JS-rendered, but with the DOCS_timing marker and two more image URLs only
+# inside a script string. --fallback auto scans the scripts and does not run
+# the domain listing.
+GSITES_IMG_HTML = (
+    r"""<!DOCTYPE html><html lang="en-US"><head><meta charset="utf-8">"""
+    r"""<script nonce="n1">var DOCS_timing={}; DOCS_timing['sl']=new Date().getTime();</script>"""
+    r"""<title>Andrew Luxem</title></head><body>"""
+    r"""<img src="https://lh3.googleusercontent.com/sitesv/IMG000=w400" alt="">"""
+    + FILLER
+    + r"""<script nonce="n1">AF_initDataCallback({key: 'ds:1', data:[["https:\/\/lh3.googleusercontent.com\/sitesv\/DDD444=w1280"],"""
+    r"""["https:\/\/lh3.googleusercontent.com\/sitesv\/EEE555=w1280"]]});</script>"""
+    r"""</body></html>"""
+    "\n"
+).encode("utf-8")
+
 # Classic static page covering every source type in spec 3.5. The page URL
 # used by the tests is https://example.com/blog/2020/post.html and the
 # <base href> moves relative resolution to https://example.com/assets/.
@@ -313,6 +329,8 @@ def fixtures() -> dict:
             {"Content-Type": HTML_UTF8, "Content-Encoding": "gzip"},
             gz(GSITES_HTML),
         ),
+        # Script scan without a JS-rendered verdict.
+        "page_gsites_img": (200, html_meta, GSITES_IMG_HTML),
         # Case 6: classic page.
         "page_classic": (200, html_meta, CLASSIC_HTML),
         # Case 11: toolbar markers.
