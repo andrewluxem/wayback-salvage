@@ -35,13 +35,13 @@ In order: list captures, analyse one capture (encoding, JS-rendered verdict, ima
 | `snapshots URL [--from YYYYMMDD] [--to YYYYMMDD] [--limit N] [--match exact\|prefix\|host\|domain] [--status 200] [--collapse digest]` | CDX query. Prints timestamp, original, status, mimetype, digest, length and Wayback URL per capture. |
 | `fetch URL -t TS [--save FILE]` | One `id_` fetch, decoded. Prints final timestamp, content type, encoding, bytes and sha256. |
 | `page URL (-t TS \| --latest)` | Fetches and analyses one archived page: decoded size, encoding, toolbar-injection flag, JS-rendered verdict with reasons, image candidates by source type. Downloads no images. |
-| `images URL (-t TS \| --latest) [--fallback auto\|never\|always] [--prefer-live] [--follow-css] [--save-inline]` | Main workflow: fetch the page, extract and resolve image URLs, download each via `id_` at the page timestamp, run fallbacks, write the manifest. |
+| `images URL (-t TS \| --latest) [--fallback auto\|never\|always] [--from YYYYMMDD] [--to YYYYMMDD] [--prefer-live] [--follow-css] [--save-inline]` | Main workflow: fetch the page, extract and resolve image URLs, download each via `id_` at the page timestamp, run fallbacks, write the manifest. `--from`/`--to` bound the fallback's domain listing. |
 | `site-images DOMAIN [--from YYYYMMDD] [--to YYYYMMDD] [--loose-mime] [--cdx-limit N]` | CDX listing of the domain's archived images (including `www.` and subdomains), deduped by digest, then downloaded. `--cdx-limit` defaults to 2000 rows. |
 | `verify` | Re-hashes every saved file in `--out` against the manifest, prints counts by `status` and `found_via`, exits 5 on a modified or missing file. |
 
 `-t` is short for `--timestamp`. URLs without a scheme are accepted. `page` and `images` take exactly one of `--timestamp` or `--latest`. `--latest` asks CDX for the newest 200 `text/html` capture of the exact URL; if that returns nothing or more than one row, it requests `/web/<now>id_/<url>` and follows the redirect to the newest capture. The output says which path it used.
 
-`--fallback auto` (the default) runs the JS fallback only when the page is judged JS-rendered: a scan of inline scripts for image URLs (including JSON- and JS-escaped forms), then a CDX listing of the domain's own images, then a report of third-party hosts seen in scripts. A page counts as JS-rendered when it has no content images (icons, `meta` images and CSS backgrounds do not count) and shows at least one sign of script building: a known marker (`DOCS_timing`, `atari`, an empty `root` or `app` div, `ng-version`), inline script over half the document, or under 200 characters of visible text. `page` prints the reasons. `--loose-mime` matches images by file extension instead of CDX mimetype, for captures stored as `application/octet-stream`.
+The JS fallback has two steps. A page shows signs of script building (`js_reasons`) when it has a known marker (`DOCS_timing`, `atari`, an empty `root` or `app` div, `ng-version`), inline script over half the document, or under 200 characters of visible text. It is judged JS-rendered when it shows a sign and has no content images (icons, `meta` images and CSS backgrounds do not count). `page` prints both. With `--fallback auto` (the default), any sign runs the script scan, even beside content images: inline scripts, ld+json and other data blocks included, are searched for absolute image URLs, JSON- and JS-escaped forms decoded. On known image hosts a path ending in `.html`, `.js`, `.css`, `.json` or a font extension is not taken as an image. Only a JS-rendered verdict also runs the CDX listing of the domain's own images, bounded to captures within 365 days either side of the page's capture; `--from` and `--to` replace either bound (`--from 1996` reaches back to the start). `always` runs both steps, `never` neither. The `images` summary reports `js_scan_ran`, `listing_ran` and `listing_window`, plus a report of third-party hosts seen in JavaScript; data blocks such as ld+json are left out of that report. `--loose-mime` matches images by file extension instead of CDX mimetype, for captures stored as `application/octet-stream`.
 
 Shared options:
 
@@ -87,17 +87,17 @@ Status values:
 |---|---|
 | `ok` | Saved, and the magic bytes match an image (PNG, JPEG, GIF, WEBP, ICO, BMP, AVIF/HEIC, SVG) or the page decoded. |
 | `duplicate` | Same sha256 as an earlier file, or a CDX digest already saved (not fetched again); `saved_path` points at that file. |
-| `not-archived` | No capture exists. |
+| `not-archived` | No capture exists: Wayback answered 404 and the exact-URL CDX lookup found nothing. A lookup that failed is `error` instead. |
 | `http-<code>` | Final response had that HTTP status. |
-| `type-mismatch` | A 200 whose body is HTML or an unknown type (usually a soft 404). Not counted as recovered. |
+| `type-mismatch` | A 200 whose body is HTML or an unknown type (usually a soft 404). Not counted as recovered. archive.org's own outage page never lands here; it is retried as a 503. |
 | `encoding-unsupported` | `br` or `zstd` body with no decoder available. |
 | `encoding-mismatch` | Header claims an encoding the body does not decode with; raw bytes kept. |
 | `toolbar-injected` | An `id_` HTML response contains Wayback toolbar markup, so the `id_` was lost (usually through a redirect). |
 | `inline-data` | A `data:` URI on the page; recorded, not saved unless `--save-inline`. |
-| `rate-limited` | Retries ran out on 429, 502, 503, 504 or connection resets. |
+| `rate-limited` | Retries ran out on 429, 502, 503, 504, connection resets or archive.org outage responses. |
 | `skipped-cap` | Not attempted because `--max-requests` was reached. |
 | `planned` | Written by `--dry-run`. |
-| `error` | Anything else; see `error`. |
+| `error` | Anything else, such as a failed nearest-capture CDX lookup; see `error`. |
 
 Resume: rerunning the same command with the same `--out` skips rows whose status is `ok`, `duplicate`, `not-archived`, `type-mismatch` or `inline-data` (except `inline-data` under `--save-inline`), and retries every other status, `planned` included. The page itself is fetched again on every run, since its links are needed to know what to resume.
 
@@ -130,7 +130,7 @@ Resume: rerunning the same command with the same `--out` skips rows whose status
 - A different capture at the same path gets `__<ts>` before the extension.
 - When the URL has no extension, the extension comes from the magic-byte sniff.
 - Path segments are capped at 120 characters, `..` and absolute segments are neutralised, and every final path is checked to be inside `--out`.
-- `requests.jsonl` has one JSON object per HTTP request, keys `time`, `method`, `url`, `status`, `bytes`, `wait` (seconds waited before it) and `attempt`. `grep -c '"status": 429' out/requests.jsonl` counts throttles.
+- `requests.jsonl` has one JSON object per HTTP request, keys `time`, `method`, `url`, `status`, `bytes`, `wait` (seconds waited before it) and `attempt`. `grep -c '"status": 429' out/requests.jsonl` counts throttles. `status` is the status on the wire, so an outage page served as a 200 logs 200 even though it was retried.
 
 ## Exit codes
 
@@ -139,7 +139,7 @@ Resume: rerunning the same command with the same `--out` skips rows whose status
 | 0 | Done. |
 | 1 | Usage or unexpected error. |
 | 2 | `--max-requests` reached. Rerun the same command to resume. |
-| 3 | Aborted on sustained 429/503. Rerun the same command later to resume. |
+| 3 | Aborted on sustained 429/503 or an archive.org outage. Rerun the same command later to resume. |
 | 4 | TLS verification failed. The message names the fix. |
 | 5 | `verify` found a modified or missing file. |
 
@@ -167,6 +167,7 @@ urllib sends no `Accept-Encoding` and decodes nothing, and Wayback replays `id_`
 - On 429, 502, 503, 504 and connection resets: wait `max(Retry-After, 30 * 2**attempt)` seconds plus jitter, capped at 600 s, for up to `--max-retries` (default 4) retries. `Retry-After` is accepted as seconds or an HTTP date.
 - After any 429 the steady delay doubles for the rest of the run, capped at 60 s.
 - When retries run out the run stops, flushes the manifest and exits 3.
+- From archive.org, a response whose `<title>` contains "Temporarily Offline" is handled as a 503 whatever its status code, and a 200 CDX body that is not JSON is retried the same way (an empty body still means no captures). Neither becomes `not-archived` or `type-mismatch`, so a rerun after the outage picks the rows up again.
 - `--max-requests` (default 300) counts every HTTP request, redirect hops and `--follow-css` fetches included. At the cap, remaining items get `skipped-cap` and the run exits 2.
 - The availability API is never used; CDX covers it.
 - An image's nearest capture comes from requesting `/web/<page_ts>id_/<image_url>` and following Wayback's redirect. A per-image CDX lookup happens only after a 404.
@@ -188,7 +189,8 @@ The suite is offline. A module-level guard makes any socket connection fail, and
 ## Limitations
 
 - Single-threaded by design. A full 300-request run at the default pace takes more than half an hour.
-- JS-rendered sites such as Google Sites may yield only icons: images loaded by JavaScript are found only if their URLs appear in inline script strings or in the domain's CDX listing. The host report says where to look next.
+- JS-rendered sites such as Google Sites may yield only icons: images loaded by JavaScript are found only if their URLs appear in inline script strings or in the domain's CDX listing (within its date window). The host report says where to look next.
+- An archived page whose own `<title>` contains "Temporarily Offline" cannot be told apart from archive.org's outage page. It is retried until the run exits 3.
 
 ## License
 
