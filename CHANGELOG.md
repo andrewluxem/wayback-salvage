@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-24
+
+Fixes from the live recheck of 0.2.0.
+
+### Added
+
+- `page` and the manifest record `memento_datetime`, the `Memento-Datetime` header of the final response (blank when absent). The manifest column comes last; a manifest from 0.2.0 or earlier is rewritten with the new header before the first row is appended to it.
+- `page` prints `js_scan_ran` in text and JSON output: true when `images --fallback auto` would scan the scripts (any `js_reasons`).
+- Tests: the `page_script_hosts` fixture, with hosts that are loaded, mentioned, or both, and a Next.js flight-data copy of its ld+json block.
+
+### Changed
+
+- The host report is split in two. `script_src_host.*` lists hosts of the `<script src>` JavaScript the page loads; `script_text_host.*` lists hosts only mentioned inside inline JavaScript, leaving out any host that is also loaded. Loaded hosts come first in the `images` progress line and in the `page` and `images` output. The JSON keys `script_src_host` and `script_text_host` replace `host_report`, and the `script_host.*` lines are gone. ld+json and other data blocks stay out of both.
+
+### Fixed
+
+- After the ld+json exclusion, the live andrewluxem.com report still counted schema.org 5 times and each social host twice. The second copy is the Next.js RSC flight data (`self.__next_f.push`, untyped inline scripts that repeat each ld+json block as a string). Those hosts now appear only under `script_text_host`, apart from the hosts the page actually loads.
+- An archived page whose own `<title>` says "Temporarily Offline" was retried as an outage on every run, until exit 3. On replay (`/web/`) responses the title now means an outage only when `Memento-Datetime` is absent, since a real replay always sends it. CDX responses keep the title-only rule.
+
 ## [0.2.0] - 2026-10-24
 
 Fixes from the first live acceptance run.
