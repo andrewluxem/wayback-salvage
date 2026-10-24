@@ -27,6 +27,7 @@ import socket
 import ssl
 import sys
 import tempfile
+import textwrap
 import time
 import traceback
 import urllib.error
@@ -2295,7 +2296,7 @@ def build_parser(stdout, stderr) -> argparse.ArgumentParser:
     sub.required = True
 
     def add(name, help_text, description):
-        return sub.add_parser(name, parents=[common], help=help_text, description=description,
+        return sub.add_parser(name, parents=[common], help=help_text, description=textwrap.fill(description, 78),
                               epilog=EXIT_CODES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
 
     def capture_choice(p):
