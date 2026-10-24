@@ -778,3 +778,398 @@ def sniff_image(data: bytes):
     if _looks_like_svg(data[:1024]):
         return "svg"
     return None
+
+
+# ------------------------------------------------------- HTML extraction
+
+# img attributes checked, in this order; lazy-loading variants included.
+IMG_ATTRS = ("src", "srcset", "data-src", "data-srcset", "data-original", "data-lazy-src", "data-lazy")
+SRCSET_ATTRS = frozenset(("srcset", "data-srcset", "imagesrcset"))
+OG_PROPERTIES = ("og:image", "og:image:url", "og:image:secure_url")
+SKIP_SCHEMES = ("javascript:", "about:", "blob:")
+# url() references in CSS that are certainly not images.
+NON_IMAGE_EXTS = frozenset(("woff", "woff2", "ttf", "otf", "eot", "css", "js", "htc", "json", "html", "htm"))
+# found_via prefixes that count as content images for the JS-rendered
+# verdict. Icons, meta images and CSS backgrounds do not.
+CONTENT_VIA = ("img:", "picture-source:", "source:", "input-image:", "video:", "svg-image:", "link:preload")
+HIDDEN_TEXT_TAGS = frozenset(("noscript", "template", "title"))
+
+_CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""", re.I)
+
+
+def css_urls(text: str) -> list:
+    return [a or b or c for a, b, c in _CSS_URL_RE.findall(text or "")]
+
+
+def parse_srcset(value: str) -> list:
+    """URLs from a srcset, per the WHATWG candidate algorithm: a URL is a
+    run of non-whitespace (inner commas kept), trailing commas stripped,
+    descriptors skipped up to the next comma outside parentheses."""
+    s = value or ""
+    n = len(s)
+    i = 0
+    urls = []
+    while True:
+        while i < n and (s[i].isspace() or s[i] == ","):
+            i += 1
+        if i >= n:
+            break
+        j = i
+        while j < n and not s[j].isspace():
+            j += 1
+        url = s[i:j]
+        i = j
+        if url.endswith(","):
+            url = url.rstrip(",")
+        else:
+            depth = 0
+            while i < n:
+                c = s[i]
+                i += 1
+                if c == "(":
+                    depth += 1
+                elif c == ")" and depth:
+                    depth -= 1
+                elif c == "," and not depth:
+                    break
+        if url:
+            urls.append(url)
+    return urls
+
+
+class Candidate:
+    __slots__ = ("url", "found_via", "inline")
+
+    def __init__(self, url: str, found_via: str, inline: bool = False):
+        self.url = url
+        self.found_via = found_via
+        self.inline = inline
+
+    def __repr__(self):
+        return "Candidate(%r, %r)" % (self.url, self.found_via)
+
+    def __eq__(self, other):
+        return isinstance(other, Candidate) and (self.url, self.found_via) == (other.url, other.found_via)
+
+    def __hash__(self):
+        return hash((self.url, self.found_via))
+
+
+class Extraction:
+    def __init__(self):
+        self.candidates = []
+        self.base_url = ""
+        self.scripts = []
+        self.script_srcs = []
+        self.stylesheets = []
+        self.visible_text_chars = 0
+        self.script_bytes = 0
+        self.doc_bytes = 0
+
+
+class _Collector(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.refs = []
+        self.base_href = None
+        self.picture_depth = 0
+        self.hidden_depth = 0
+        self.script_buf = None
+        self.style_buf = None
+        self.scripts = []
+        self.script_srcs = []
+        self.stylesheet_hrefs = []
+        self.text = []
+        self.script_bytes = 0
+
+    def _add(self, value, via):
+        if value is not None:
+            self.refs.append((value, via))
+
+    def handle_starttag(self, tag, attrs):
+        a = {}
+        ordered = []
+        for k, v in attrs:
+            if k not in a:
+                a[k] = v if v is not None else ""
+                ordered.append(k)
+        if "style" in a:
+            for u in css_urls(a["style"]):
+                self._add(u, "style-attr")
+
+        if tag == "img":
+            for k in ordered:
+                if k in IMG_ATTRS:
+                    if k in SRCSET_ATTRS:
+                        for u in parse_srcset(a[k]):
+                            self._add(u, "img:" + k)
+                    else:
+                        self._add(a[k], "img:" + k)
+        elif tag == "picture":
+            self.picture_depth += 1
+        elif tag == "source":
+            if self.picture_depth:
+                for k in ("srcset", "data-srcset"):
+                    for u in parse_srcset(a.get(k, "")):
+                        self._add(u, "picture-source:" + k)
+            elif a.get("type", "").strip().lower().startswith("image/"):
+                if "src" in a:
+                    self._add(a["src"], "source:src")
+                for k in ("srcset", "data-srcset"):
+                    for u in parse_srcset(a.get(k, "")):
+                        self._add(u, "source:" + k)
+        elif tag == "input":
+            if a.get("type", "").strip().lower() == "image":
+                self._add(a.get("src"), "input-image:src")
+        elif tag == "video":
+            self._add(a.get("poster"), "video:poster")
+        elif tag == "image":
+            for k in ("href", "xlink:href"):
+                self._add(a.get(k), "svg-image:href")
+        elif tag == "meta":
+            prop = (a.get("property") or a.get("name") or "").strip().lower()
+            content = a.get("content")
+            if prop in OG_PROPERTIES:
+                self._add(content, "meta:" + prop)
+            elif prop in ("twitter:image", "twitter:image:src"):
+                self._add(content, "meta:twitter:image")
+            if a.get("itemprop", "").strip().lower() == "image":
+                self._add(content, "meta:itemprop")
+        elif tag == "link":
+            rels = a.get("rel", "").lower().split()
+            href = a.get("href")
+            if any("icon" in r for r in rels):
+                self._add(href, "link:icon")
+            if "image_src" in rels:
+                self._add(href, "link:image_src")
+            if "preload" in rels and a.get("as", "").strip().lower() == "image":
+                self._add(href, "link:preload")
+                for u in parse_srcset(a.get("imagesrcset", "")):
+                    self._add(u, "link:preload")
+            if "stylesheet" in rels and href:
+                self.stylesheet_hrefs.append(href)
+        elif tag == "base":
+            if self.base_href is None and a.get("href"):
+                self.base_href = a["href"]
+        elif tag == "script":
+            if a.get("src"):
+                self.script_srcs.append(a["src"])
+            self.script_bytes += len(self.get_starttag_text() or "")
+            self.script_buf = []
+        elif tag == "style":
+            self.style_buf = []
+        elif tag in HIDDEN_TEXT_TAGS:
+            self.hidden_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag == "picture":
+            self.picture_depth = max(0, self.picture_depth - 1)
+        elif tag == "script" and self.script_buf is not None:
+            self._finish_script()
+        elif tag == "style" and self.style_buf is not None:
+            self._finish_style()
+        elif tag in HIDDEN_TEXT_TAGS:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+
+    def _finish_script(self):
+        text = "".join(self.script_buf)
+        self.script_buf = None
+        if text.strip():
+            self.scripts.append(text)
+        self.script_bytes += len(text)
+
+    def _finish_style(self):
+        text = "".join(self.style_buf)
+        self.style_buf = None
+        for u in css_urls(text):
+            self._add(u, "style-block")
+
+    def handle_data(self, data):
+        if self.script_buf is not None:
+            self.script_buf.append(data)
+        elif self.style_buf is not None:
+            self.style_buf.append(data)
+        elif not self.hidden_depth:
+            self.text.append(data)
+
+    def finish(self):
+        self.close()
+        if self.script_buf is not None:
+            self._finish_script()
+        if self.style_buf is not None:
+            self._finish_style()
+
+
+def _url_ext(url: str) -> str:
+    path = urllib.parse.urlsplit(url).path
+    name = path.rsplit("/", 1)[-1]
+    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def resolve_ref(raw: str, base: str):
+    """(url, inline) for an attribute value, or None to skip it."""
+    ref = (raw or "").strip()
+    if not ref or ref.startswith("#"):
+        return None
+    low = ref.lower()
+    if low.startswith("data:"):
+        return ref, True
+    if low.startswith(SKIP_SCHEMES):
+        return None
+    ref = unwrap_wayback(ref)
+    try:
+        url = urllib.parse.urljoin(base, ref)
+        if urllib.parse.urlsplit(url).scheme.lower() not in ("http", "https"):
+            return None
+        return normalize_url(url), False
+    except ValueError:
+        return None
+
+
+def extract(html_text: str, page_url: str) -> Extraction:
+    """Image candidates and page facts. Relative references resolve against
+    <base href> if present, else page_url (the original URL, never the
+    Wayback URL)."""
+    p = _Collector()
+    try:
+        p.feed(html_text)
+        p.finish()
+    except Exception:
+        # HTMLParser tolerates nearly everything; keep what was collected.
+        pass
+    ex = Extraction()
+    base = page_url
+    if p.base_href:
+        joined = resolve_ref(p.base_href, page_url)
+        if joined and not joined[1]:
+            base = joined[0]
+    ex.base_url = base
+    seen = set()
+    for raw, via in p.refs:
+        r = resolve_ref(raw, base)
+        if r is None:
+            continue
+        url, inline = r
+        if via in ("style-attr", "style-block") and not inline and _url_ext(url) in NON_IMAGE_EXTS:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        ex.candidates.append(Candidate(url, via, inline))
+    for src in p.script_srcs:
+        r = resolve_ref(src, base)
+        if r and not r[1]:
+            ex.script_srcs.append(r[0])
+    for href in p.stylesheet_hrefs:
+        r = resolve_ref(href, base)
+        if r and not r[1]:
+            ex.stylesheets.append(r[0])
+    ex.scripts = p.scripts
+    ex.visible_text_chars = len(" ".join(" ".join(p.text).split()))
+    ex.script_bytes = p.script_bytes
+    ex.doc_bytes = len(html_text)
+    return ex
+
+
+# ------------------------------------------- JS-rendered detection, fallback
+
+_MARKERS = (
+    ("DOCS_timing", re.compile(r"DOCS_timing")),
+    ("atari", re.compile(r"\batari\b")),
+    ('id="root"></div>', re.compile(r"""id=["']root["']\s*>\s*</div>""", re.I)),
+    ('id="app"></div>', re.compile(r"""id=["']app["']\s*>\s*</div>""", re.I)),
+    ("ng-version", re.compile(r"\bng-version\b")),
+)
+VISIBLE_TEXT_MIN = 200
+
+
+def content_image_count(ex: Extraction) -> int:
+    return sum(1 for c in ex.candidates if not c.inline and c.found_via.startswith(CONTENT_VIA))
+
+
+def js_verdict(ex: Extraction, html_text: str) -> tuple:
+    """(js_rendered, reasons). True when there are no content images and at
+    least one sign of a script-built page."""
+    reasons = []
+    for label, rx in _MARKERS:
+        if rx.search(html_text):
+            reasons.append("marker:" + label)
+    if ex.doc_bytes and ex.script_bytes * 2 > ex.doc_bytes:
+        reasons.append("script-bytes:%d%%" % (100 * ex.script_bytes // ex.doc_bytes))
+    if ex.visible_text_chars < VISIBLE_TEXT_MIN:
+        reasons.append("visible-text:%d" % ex.visible_text_chars)
+    return content_image_count(ex) == 0 and bool(reasons), reasons
+
+
+# Escapes decoded inside script text: JSON \/ plus \u00XX and \xXX forms of
+# URL punctuation. Quotes and backslashes stay escaped so string ends hold.
+_JS_ESCAPE_RE = re.compile(r"\\(?:u00([0-9a-fA-F]{2})|x([0-9a-fA-F]{2})|(/))")
+_JS_ESCAPE_OK = frozenset("/=&:?%+,;~@-._#")
+_ABS_URL_RE = re.compile(r"""https?://[^\s"'`<>\\()\[\]{}|^;]+""", re.I)
+_IMAGE_PATH_RE = re.compile(r"\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp)$", re.I)
+IMAGE_HOSTS = (
+    "googleusercontent.com", "ggpht.com", "res.cloudinary.com", "imgix.net",
+    "images.ctfassets.net", "images.squarespace-cdn.com", "static.wixstatic.com",
+)
+
+
+def unescape_js(text: str) -> str:
+    def rep(m):
+        if m.group(3):
+            return "/"
+        ch = chr(int(m.group(1) or m.group(2), 16))
+        return ch if ch in _JS_ESCAPE_OK else m.group(0)
+
+    return _JS_ESCAPE_RE.sub(rep, text)
+
+
+def _script_urls(texts) -> list:
+    out = []
+    for text in texts:
+        for m in _ABS_URL_RE.finditer(unescape_js(text)):
+            out.append(m.group(0).rstrip(".,:"))
+    return out
+
+
+def _is_image_url(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    if _IMAGE_PATH_RE.search(parts.path):
+        return True
+    return any(host == h or host.endswith("." + h) for h in IMAGE_HOSTS)
+
+
+def scan_js_strings(texts) -> list:
+    """Absolute image URLs inside inline script text, escapes decoded."""
+    found = []
+    seen = set()
+    for raw in _script_urls(texts):
+        url = unwrap_wayback(raw)
+        try:
+            host = urllib.parse.urlsplit(url).hostname
+            url = normalize_url(url)
+        except ValueError:
+            continue
+        if is_archive_host(host) or not _is_image_url(url) or url in seen:
+            continue
+        seen.add(url)
+        found.append(url)
+    return found
+
+
+def host_report(ex: Extraction, page_host: str) -> list:
+    """Third-party hosts referenced by scripts, most frequent first."""
+    own = own_domain(page_host)
+    counts = collections.Counter()
+    for url in ex.script_srcs + _script_urls(ex.scripts):
+        try:
+            host = (urllib.parse.urlsplit(unwrap_wayback(url)).hostname or "").lower()
+        except ValueError:
+            continue
+        if not host or is_archive_host(host) or host == own or host.endswith("." + own):
+            continue
+        counts[host] += 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
