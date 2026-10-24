@@ -1,0 +1,6 @@
+[["original", "timestamp", "mimetype", "statuscode", "digest", "length"],
+["https://andrewluxem.com/", "20211118160203", "text/html", "200", "DIGEST00", "15000"],
+["https://andrewluxem.com/", "20220220124928", "text/html", "200", "DIGEST01", "15001"],
+["https://andrewluxem.com/", "20240420013920", "text/html", "200", "DIGEST02", "15002"],
+["https://andrewluxem.com/", "20240807154344", "text/html", "200", "DIGEST03", "15003"],
+["https://andrewluxem.com/", "20240916025321", "text/html", "200", "DIGEST04", "15004"]]

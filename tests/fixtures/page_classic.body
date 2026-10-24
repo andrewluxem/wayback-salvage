@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<HTML>
+<HEAD>
+<BASE HREF="/assets/">
+<META property="og:image" content="https://cdn.example.com/og.jpg">
+<meta name="twitter:image" content="/social/tw.png">
+<meta itemprop="image" content="schema.png">
+<link rel="icon" href="/favicon.ico">
+<link rel="shortcut icon" href="/favicon2.ico">
+<link rel="apple-touch-icon" href="/apple.png">
+<link rel="apple-touch-icon-precomposed" href="/apple-pre.png">
+<link rel="mask-icon" href="/mask.svg" color="#000000">
+<link rel="image_src" href="/imgsrc.jpg">
+<link rel="preload" as="image" href="/hero.webp" imagesrcset="/hero-1x.webp 1x, /hero-2x.webp 2x">
+<link rel="stylesheet" href="/style.css">
+<STYLE>
+.hero { background-image: url("/bg/double.jpg"); }
+.x { background: url('/bg/single.png') no-repeat; }
+.y { background: URL(/bg/none.gif); }
+@font-face { font-family: X; src: url(/fonts/a.woff2) format("woff2"); }
+.z { filter: url(#svgfilter); }
+</STYLE>
+</HEAD>
+<BODY>
+<IMG SRC="img/relative.png" ALT="relative">
+<img src="../parent.png">
+<img src="//static.example.net/proto.png">
+<img src='single.jpg'>
+<img src=unquoted.gif>
+<img src="/q.png?a=1&amp;b=2">
+<img src="data:image/png;base64,iVBORw0KGgo=">
+<img src="https://web.archive.org/web/20200101000000im_/https://example.com/rewritten.png">
+<img src="/web/20190101000000im_/http://old.example.com/rel-rewritten.png">
+<img srcset="https://res.cloudinary.com/demo/image/upload/w_300,h_200,c_fill/sample.jpg 300w, https://res.cloudinary.com/demo/image/upload/w_600,h_400,c_fill/sample.jpg 600w" src="fallback.jpg">
+<img data-src="lazy.jpg" data-srcset="lazy-1x.jpg 1x, lazy-2x.jpg 2x" data-original="orig.jpg" data-lazy-src="lazysrc.jpg" data-lazy="lazy2.jpg">
+<picture><source srcset="pic.avif" type="image/avif"><source data-srcset="pic-lazy.webp"><img src="pic.jpg"></picture>
+<video poster="/poster.jpg"><source src="/movie.mp4" type="video/mp4"></video>
+<source srcset="/standalone-img.png" type="image/png">
+<input type="image" src="/button.png">
+<svg width="10" height="10"><image href="/svg-href.png"/><image xlink:href="/svg-xlink.png"/></svg>
+<div style="background-image:url(&quot;/inline-style.jpg&quot;)"></div>
+<a href="#top">top</a>
+<img src="javascript:void(0)">
+<img src="about:blank">
+<img src="">
+<img src="#">
+<img src="blob:https://example.com/0f1e2d">
+<P>Plain archived prose for the visible text count. Plain archived prose for the visible text count. Plain archived prose for the visible text count. Plain archived prose for the visible text count. Plain archived prose for the visible text count. Plain archived prose for the visible text count. Plain archived prose for the visible text count. Plain archived prose for the visible text count.</P>
+</BODY>
+</HTML>

@@ -1,0 +1,3 @@
+[["timestamp", "original", "statuscode", "mimetype", "digest", "length"],
+["20210101000000", "https://example.com/logo.png", "200", "image/png", "DIGESTLOGO", "100"],
+["20210101000000", "https://www.example.com/banner.gif", "200", "image/gif", "DIGESTBANNER", "300"]]
