@@ -104,7 +104,8 @@ def js_escape(text: str, chars: str = "/=&", upper: bool = False) -> str:
 # lh3.googleusercontent.com image URLs that exist only inside script
 # strings. The first uses JSON-escaped slashes and a literal "=w1280"; the
 # second writes every /, = and & as a backslash-u00XX escape, so its query
-# carries an escaped &.
+# carries an escaped &. The atari-embeds frame URL (seen in the live run)
+# sits on an image host but is HTML, so the scan must not keep it.
 GSITES_HTML = (
     r"""<!DOCTYPE html><html lang="en-US" itemscope itemtype="http://schema.org/WebPage"><head><meta charset="utf-8">"""
     r"""<script nonce="n1">var DOCS_timing={}; DOCS_timing['sl']=new Date().getTime();</script>"""
@@ -117,6 +118,7 @@ GSITES_HTML = (
     r"""</head><body><div jscontroller="pc62j" jsaction="rcuQ6b:WYd;" class="Xpil1b"><div id="atari-page" class="UtePc">Andrew Luxem</div></div>"""
     r"""<script nonce="n1">AF_initDataCallback({key: 'ds:0', hash: '1', data:[[["https:\/\/lh3.googleusercontent.com\/sitesv\/AAA111=w1280",1280,720]],"""
     + '[{"src":"' + js_escape("https://lh3.googleusercontent.com/sitesv/BBB222?authuser=0&fife=s16383") + '"}],'
+    r""""https:\/\/1230016118-atari-embeds.googleusercontent.com\/embeds\/16cb204cf3a9d4d223a0a3fd8b0eec5d\/inner-frame-minified.html","""
     r""""https:\/\/www.gstatic.com\/atari\/embeds\/913b.js"], sideChannel: {}});</script>"""
     r"""</body></html>"""
     "\n"

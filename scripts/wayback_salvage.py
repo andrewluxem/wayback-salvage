@@ -1140,6 +1140,9 @@ def _is_image_url(url: str) -> bool:
         return False
     if _IMAGE_PATH_RE.search(parts.path):
         return True
+    # Image hosts also serve frames and scripts (atari-embeds .html, .js).
+    if _url_ext(url) in NON_IMAGE_EXTS:
+        return False
     return any(host == h or host.endswith("." + h) for h in IMAGE_HOSTS)
 
 

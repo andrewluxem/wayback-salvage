@@ -72,8 +72,29 @@ class TestGoogleSitesPage(unittest.TestCase):
         for code in ("u002f", "u003d", "u0026"):
             self.assertIn(BACKSLASH + code, html)
         self.assertNotIn("BBB222?authuser=0", html)
+        # The atari-embeds frame (HTML on an image host) is present but not kept.
+        self.assertIn("atari-embeds.googleusercontent.com", html)
         ex = ws.extract(html, PAGE)
         self.assertEqual(ws.scan_js_strings(ex.scripts), [JS_A, JS_B])
+
+    def test_non_image_paths_on_image_hosts_rejected(self):
+        # Live run: this matched only because the host ends in
+        # googleusercontent.com.
+        embed = ("https://1230016118-atari-embeds.googleusercontent.com/embeds/"
+                 "16cb204cf3a9d4d223a0a3fd8b0eec5d/inner-frame-minified.html")
+        keep_a = "https://lh3.googleusercontent.com/sitesv/KEEP1=w800"
+        keep_b = "https://res.cloudinary.com/d/image/upload/keep2.png"
+        script = ",".join('"%s"' % u for u in (
+            embed,
+            embed.replace("/", BACKSLASH + "/"),
+            embed + "?jsh=m",
+            "https://lh3.googleusercontent.com/static/app.js",
+            "https://res.cloudinary.com/d/raw/upload/site.css",
+            "https://images.ctfassets.net/space/data.json",
+            keep_a,
+            keep_b,
+        ))
+        self.assertEqual(ws.scan_js_strings([script]), [keep_a, keep_b])
 
     def test_scan_hex_and_unicode_escape_forms(self):
         script = (
