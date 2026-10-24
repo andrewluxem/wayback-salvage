@@ -264,8 +264,30 @@ class TestScanWithoutJsRenderedVerdict(unittest.TestCase):
             code, stdout, stderr = run_cli(["page", PAGE, "-t", TS, "-o", out], t)
         self.assertEqual(code, ws.EXIT_OK, stderr)
         self.assertIn("js_rendered=false", stdout)
+        self.assertIn("\njs_scan_ran=true\n", stdout)
         self.assertIn("found_via.js-string=2", stdout)
         self.assertIn("candidate=js-string " + self.JS_D, stdout)
+
+    def test_page_prints_js_scan_ran(self):
+        # The static page's script names an image, but without js_reasons
+        # images --fallback auto would not scan it, so page lists none.
+        static = ('<html><body><img src="%s"><p>' % self.IMG + "Plain static text. " * 20 + "</p>"
+                  + '<script>x="%s"</script></body></html>' % self.JS_D)
+        for name, page_resp, want in (
+            ("js-rendered", fixture("page_gsites"), True),
+            ("signs and an img", fixture("page_gsites_img"), True),
+            ("static", resp(200, {"Content-Type": "text/html"}, static.encode()), False),
+            ("not archived", resp(404, {"Content-Type": "text/html"}, b"<html></html>"), False),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as out:
+                t = FakeTransport().add(wb(TS, PAGE), page_resp)
+                code, stdout, stderr = run_cli(["page", PAGE, "-t", TS, "-o", out], t)
+                self.assertEqual(code, ws.EXIT_OK, stderr)
+                code, jout, _ = run_cli(["page", PAGE, "-t", TS, "-o", out, "--json"], t)
+                self.assertEqual(code, ws.EXIT_OK)
+                self.assertIn("\njs_scan_ran=%s\n" % ("true" if want else "false"), stdout)
+                self.assertIs(json.loads(jout)["js_scan_ran"], want)
+                self.assertEqual("candidate=js-string" in stdout, want)
 
 
 class TestHostReport(unittest.TestCase):

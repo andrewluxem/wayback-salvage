@@ -1713,11 +1713,16 @@ class PageResult:
         self.error = ""
         self.decoded = None
 
+    @property
+    def js_scan_ran(self) -> bool:
+        """Whether images --fallback auto scans the scripts: any js_reasons."""
+        return bool(self.js_reasons)
+
     def candidates(self) -> list:
         if self.extraction is None:
             return []
         out = [(c.url, c.found_via) for c in self.extraction.candidates]
-        if self.js_reasons:  # what images --fallback auto would scan
+        if self.js_scan_ran:
             known = {u for u, _ in out}
             out += [(u, "js-string") for u in self.js_strings if u not in known]
         return out
@@ -1743,6 +1748,7 @@ class PageResult:
             "toolbar_injected": self.toolbar_injected,
             "js_rendered": self.js_rendered,
             "js_reasons": self.js_reasons,
+            "js_scan_ran": self.js_scan_ran,
             "content_images": self.content_images,
             "candidates": [{"url": _short_uri(u), "found_via": v} for u, v in cands],
             "found_via": dict(collections.Counter(v for _, v in cands)),
@@ -2185,7 +2191,7 @@ def _print_page(run: Run, pr: PageResult) -> None:
     for k in ("url", "base_url", "wayback_url", "requested_timestamp", "timestamp", "memento_datetime",
               "latest_path", "http_status", "status", "content_type", "content_encoding", "raw_bytes",
               "decoded_bytes", "charset", "flags", "toolbar_injected", "js_rendered", "js_reasons",
-              "content_images", "saved_path", "error"):
+              "js_scan_ran", "content_images", "saved_path", "error"):
         if k == "latest_path" and d[k] is None:
             continue
         run.say("%s=%s" % (k, _fmt(d[k])))

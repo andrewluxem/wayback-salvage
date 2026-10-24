@@ -25,7 +25,7 @@ python3 <skill dir>/scripts/wayback_salvage.py <subcommand> [options]
 ## Workflow
 
 1. `snapshots URL --collapse digest` lists captures, oldest first (`--from`/`--to` narrow the window; `--limit N` keeps the first N). Pick a timestamp with the user, or plan to use `--latest`.
-2. `page URL -t TS -o DIR` (or `--latest`) reports encoding, decoded size, the toolbar-injection flag, the JS-rendered verdict with its reasons, and image candidates by source type. It downloads no images. Tell the user the verdict. Any `js_reasons` means `images` scans the page's scripts for image URLs (`page` already lists them as `js-string` candidates). `js_rendered=true` also adds a CDX listing of the domain's images, and the result may still be only icons.
+2. `page URL -t TS -o DIR` (or `--latest`) reports encoding, decoded size, the toolbar-injection flag, the JS-rendered verdict with its reasons, and image candidates by source type. It downloads no images. Tell the user the verdict. Any `js_reasons` means `images` scans the page's scripts for image URLs; `page` then prints `js_scan_ran=true` and already lists them as `js-string` candidates. `js_rendered=true` also adds a CDX listing of the domain's images, and the result may still be only icons.
 3. `images URL -t TS -o DIR` (or `--latest`) for one page, or `site-images DOMAIN -o DIR` for every archived image on a domain.
    - Run with `--dry-run` first whenever the count could exceed about 50: `page` listed more than that, the page is JS-rendered (the fallback's count is unknown until it runs), or the command is `site-images`.
    - Report the planned count to the user (the dry run prints it; the manifest holds `planned` rows). At the default pace the real run makes about 10 requests a minute.
