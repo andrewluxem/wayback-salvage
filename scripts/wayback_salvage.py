@@ -1504,6 +1504,41 @@ def cdx_listing(run: Run, domain: str, from_ts=None, to_ts=None, loose_mime=Fals
     return rows
 
 
+# Default reach of the images fallback's domain listing on either side of
+# the page capture. Unbounded, a 2021 page pulled in the 2026 site's images.
+LISTING_WINDOW_DAYS = 365
+
+
+def ts_datetime(ts):
+    """datetime for a 4 to 14 digit timestamp (missing month and day are
+    1, missing time is midnight), or None when it is not a date."""
+    if not ts or not ts.isdigit() or not 4 <= len(ts) <= 14:
+        return None
+    s = ts.ljust(14, "0")
+    try:
+        return datetime.datetime(int(s[0:4]), int(s[4:6]) or 1, int(s[6:8]) or 1,
+                                 int(s[8:10]), int(s[10:12]), int(s[12:14]))
+    except ValueError:
+        return None
+
+
+def listing_window(capture_ts, from_ts=None, to_ts=None) -> tuple:
+    """(from, to) for the fallback listing. Each bound is the flag when
+    given, else the capture +/- LISTING_WINDOW_DAYS, else None (open)."""
+    dt = ts_datetime(capture_ts)
+    span = datetime.timedelta(days=LISTING_WINDOW_DAYS)
+
+    def bound(given, sign):
+        if given or dt is None:
+            return given or None
+        try:
+            return (dt + sign * span).strftime("%Y%m%d%H%M%S")
+        except OverflowError:
+            return None
+
+    return bound(from_ts, -1), bound(to_ts, 1)
+
+
 class Item:
     __slots__ = ("url", "requested_ts", "found_via", "digest", "mimetype", "inline")
 
@@ -2059,7 +2094,7 @@ def _print_summary(run: Run, summary: dict) -> None:
     for k, v in summary.items():
         if isinstance(v, dict):
             for sub, n in sorted(v.items()):
-                run.say("%s.%s=%s" % (k, sub, n))
+                run.say("%s.%s=%s" % (k, sub, _fmt(n)))
         elif k == "host_report":
             for host, n in v:
                 run.say("script_host.%s=%d" % (host, n))
@@ -2077,6 +2112,7 @@ def cmd_images(run: Run) -> int:
         if a.follow_css:
             items += follow_css(run, pr)
     fallback = a.fallback == "always" or (a.fallback == "auto" and pr.js_rendered)
+    window = None
     if fallback:
         known = {i.url for i in items}
         for url in pr.js_strings:
@@ -2087,8 +2123,11 @@ def cmd_images(run: Run) -> int:
         if not domain or is_shared_host(domain):
             run.info("fallback: no CDX listing for %s (shared or empty host)" % (domain or "?"))
         else:
+            window = listing_window(pr.timestamp, a.from_ts, a.to_ts)
+            run.info("fallback: CDX listing of %s, captures from %s to %s"
+                     % (domain, window[0] or "the start", window[1] or "now"))
             try:
-                rows = cdx_listing(run, domain)
+                rows = cdx_listing(run, domain, window[0], window[1])
             except CdxError as e:
                 run.info("fallback: CDX listing failed (%s)" % e)
                 rows = []
@@ -2112,6 +2151,8 @@ def cmd_images(run: Run) -> int:
         "js_rendered": pr.js_rendered,
         "js_reasons": pr.js_reasons,
         "fallback_ran": fallback,
+        "listing_ran": window is not None,
+        "listing_window": {"from": window[0], "to": window[1]} if window else None,
         "dry_run": bool(a.dry_run),
         "candidates": len(items),
         "found_via": found_via,
@@ -2336,6 +2377,10 @@ def build_parser(stdout, stderr) -> argparse.ArgumentParser:
     p.add_argument("--fallback", choices=("auto", "never", "always"), default="auto",
                    help="JS-string scan plus the site's own CDX image listing: auto runs it when the page "
                         "looks JS-rendered (default: auto)")
+    p.add_argument("--from", dest="from_ts", metavar="YYYYMMDD", type=_ts_arg,
+                   help="earliest capture for the fallback's domain listing (default: page capture - 365 days)")
+    p.add_argument("--to", dest="to_ts", metavar="YYYYMMDD", type=_ts_arg,
+                   help="latest capture for the fallback's domain listing (default: page capture + 365 days)")
     p.add_argument("--prefer-live", action="store_true",
                    help="try each image on its live host first (1 s per-host pacing, magic-byte checked)")
     p.add_argument("--follow-css", action="store_true",

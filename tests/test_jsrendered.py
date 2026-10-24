@@ -33,18 +33,22 @@ def gsites_html() -> str:
     return gzip.decompress(fixture_body("page_gsites")).decode("utf-8")
 
 
-def gsites_transport() -> FakeTransport:
+def gsites_transport(ts: str = TS) -> FakeTransport:
     t = FakeTransport()
-    t.add(wb(TS, PAGE), fixture("page_gsites"))
+    t.add(wb(ts, PAGE), fixture("page_gsites"))
     t.add(
         lambda u: is_cdx(u) and cdx_params(u).get("matchType") == ["domain"],
         fixture("cdx_header_only"),
     )
-    t.add(wb(TS, JS_A), fixture("png_red"))
-    t.add(wb(TS, JS_B), fixture("png_green"))
-    t.add(wb(TS, OG), fixture("png_blue"))
-    t.add(wb(TS, ICON), fixture("png_white"))
+    t.add(wb(ts, JS_A), fixture("png_red"))
+    t.add(wb(ts, JS_B), fixture("png_green"))
+    t.add(wb(ts, OG), fixture("png_blue"))
+    t.add(wb(ts, ICON), fixture("png_white"))
     return t
+
+
+def listing_params(t: FakeTransport) -> list:
+    return [cdx_params(u) for u in t.calls if is_cdx(u) and cdx_params(u).get("matchType") == ["domain"]]
 
 
 class TestGoogleSitesPage(unittest.TestCase):
@@ -166,6 +170,61 @@ class TestGoogleSitesPage(unittest.TestCase):
         self.assertIn("content_encoding=gzip", stdout)
         # page never downloads images or runs the fallback listing
         self.assertEqual(t.calls, [wb(TS, PAGE)])
+
+
+class TestListingWindow(unittest.TestCase):
+    """The fallback's domain listing is bounded to the page capture +/- 365
+    days unless --from/--to say otherwise. Without a window, a 2021 page
+    pulled 36 images from the 2026 site in the live run."""
+
+    def _images(self, ts, *extra):
+        t = gsites_transport(ts)
+        with tempfile.TemporaryDirectory() as out:
+            code, stdout, stderr = run_cli(["images", PAGE, "-t", ts, "-o", out, "--quiet"] + list(extra), t)
+        self.assertEqual(code, ws.EXIT_OK, stderr)
+        return t, stdout
+
+    def test_default_window_around_2021_capture(self):
+        t, stdout = self._images("20211118160203", "--json")
+        [params] = listing_params(t)
+        self.assertEqual(params["from"], ["20201118160203"])
+        self.assertEqual(params["to"], ["20221118160203"])
+        summary = json.loads(stdout)
+        self.assertTrue(summary["listing_ran"])
+        self.assertEqual(summary["listing_window"], {"from": "20201118160203", "to": "20221118160203"})
+
+    def test_default_window_spans_a_leap_day(self):
+        t, _ = self._images(TS, "--json")
+        [params] = listing_params(t)
+        self.assertEqual((params["from"], params["to"]), (["20230917025321"], ["20250916025321"]))
+
+    def test_flags_override_each_bound(self):
+        t, stdout = self._images(TS, "--json", "--from", "2019", "--to", "20230101")
+        [params] = listing_params(t)
+        self.assertEqual((params["from"], params["to"]), (["2019"], ["20230101"]))
+        self.assertEqual(json.loads(stdout)["listing_window"], {"from": "2019", "to": "20230101"})
+        # One flag given: the other bound keeps its default.
+        t, stdout = self._images(TS, "--json", "--from", "2010")
+        [params] = listing_params(t)
+        self.assertEqual((params["from"], params["to"]), (["2010"], ["20250916025321"]))
+
+    def test_text_summary_prints_window(self):
+        _, stdout = self._images(TS)
+        self.assertIn("listing_window.from=20230917025321", stdout)
+        self.assertIn("listing_window.to=20250916025321", stdout)
+
+    def test_no_window_when_listing_did_not_run(self):
+        _, stdout = self._images(TS, "--json", "--fallback", "never")
+        summary = json.loads(stdout)
+        self.assertFalse(summary["listing_ran"])
+        self.assertIsNone(summary["listing_window"])
+
+    def test_listing_window_unit(self):
+        self.assertEqual(ws.listing_window("20240229120000"), ("20230301120000", "20250228120000"))
+        self.assertEqual(ws.listing_window("2020"), ("20190101000000", "20201231000000"))
+        self.assertEqual(ws.listing_window("", "2019", None), ("2019", None))
+        self.assertEqual(ws.listing_window("notdigits"), (None, None))
+        self.assertEqual(ws.listing_window("20201301000000"), (None, None))  # month 13
 
 
 class TestToolbar(unittest.TestCase):
