@@ -131,7 +131,7 @@ Resume: rerunning the same command with the same `--out` skips rows whose status
 - A different capture at the same path gets `__<ts>` before the extension.
 - When the URL has no extension, the extension comes from the magic-byte sniff.
 - Path segments are capped at 120 characters, `..` and absolute segments are neutralised, and every final path is checked to be inside `--out`.
-- `requests.jsonl` has one JSON object per HTTP request, keys `time`, `method`, `url`, `status`, `bytes`, `wait` (seconds waited before it) and `attempt`. `grep -c '"status": 429' out/requests.jsonl` counts throttles. `status` is the status on the wire, so an outage page served as a 200 logs 200 even though it was retried.
+- `requests.jsonl` has one JSON object per HTTP request, keys `time`, `method`, `url`, `status`, `bytes`, `wait` (seconds waited before it) and `attempt`. An attempt that got no response, such as a refused connection, has `status` 0 and an `error` key, for example `"error": "ConnectionRefusedError: [Errno 61] Connection refused"`. `grep -c '"status": 429' out/requests.jsonl` counts throttles and `grep -c '"status": 0' out/requests.jsonl` counts failed attempts. `status` is the status on the wire, so an outage page served as a 200 logs 200 even though it was retried.
 
 ## Exit codes
 

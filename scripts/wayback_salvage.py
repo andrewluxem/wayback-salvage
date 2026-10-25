@@ -565,16 +565,17 @@ class Client:
                     "GET", url, {"User-Agent": self.user_agent, "Accept": "*/*"}
                 )
             except (OSError, http.client.HTTPException) as exc:
-                self._log(started, url, 0, 0, waited, attempt)
+                error = error_text(exc)
+                self._log(started, url, 0, 0, waited, attempt, error)
                 kind = classify_error(exc)
                 if kind == "tls":
                     raise TLSError(url, exc)
                 if kind == "fatal" or live:
                     reason = getattr(exc, "reason", None) or exc
                     raise NetworkError("%s: %s" % (url, reason))
-                last = error_text(exc)
+                last = error
             except ValueError as exc:
-                self._log(started, url, 0, 0, waited, attempt)
+                self._log(started, url, 0, 0, waited, attempt, error_text(exc))
                 raise BadUrl("%s: %s" % (url, exc))
             else:
                 self._log(started, url, resp.status, len(resp.body), waited, attempt)
@@ -622,7 +623,9 @@ class Client:
                 continue
             return Fetched(current, resp, hops)
 
-    def _log(self, started, url, status, nbytes, waited, attempt) -> None:
+    def _log(self, started, url, status, nbytes, waited, attempt, error=None) -> None:
+        """One requests.jsonl line. A failed attempt (no response) has
+        status 0 and an error key with error_text()."""
         if not self.log_path:
             return
         entry = {
@@ -634,6 +637,8 @@ class Client:
             "wait": round(waited, 3),
             "attempt": attempt,
         }
+        if error is not None:
+            entry["error"] = error
         with open(self.log_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
 

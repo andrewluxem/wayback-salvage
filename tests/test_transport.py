@@ -362,6 +362,45 @@ class TestRequestLog(unittest.TestCase):
             self.assertEqual(set(e), {"time", "method", "url", "status", "bytes", "wait", "attempt"})
             self.assertIsInstance(e["status"], int)
 
+    def test_each_failed_attempt_logs_status_0_and_the_error(self):
+        refused = "ConnectionRefusedError: [Errno 61] Connection refused"
+        for label, err, cause in network_errors():
+            with self.subTest(error=label), tempfile.TemporaryDirectory() as out:
+                t = FakeTransport().add(support.is_cdx, err, err, fixture("cdx_snapshots_five"))
+                code, _, stderr = run_cli(["snapshots", "andrewluxem.com", "-o", out], t)
+                self.assertEqual(code, ws.EXIT_OK, stderr)
+                log = read_requests(out)
+                self.assertEqual([e["status"] for e in log], [0, 0, 200])
+                self.assertEqual([e["attempt"] for e in log], [0, 1, 2])
+                self.assertEqual([e.get("error") for e in log], [named(cause), named(cause), None])
+                self.assertEqual([e["bytes"] for e in log[:2]], [0, 0])
+        with tempfile.TemporaryDirectory() as out:
+            t = FakeTransport().add(support.is_cdx, ConnectionRefusedError(61, "Connection refused"))
+            code, _, _ = run_cli(["snapshots", "andrewluxem.com", "-o", out], t)
+            self.assertEqual(code, ws.EXIT_RATE)
+            log = read_requests(out)
+        self.assertEqual([(e["status"], e["error"]) for e in log], [(0, refused)] * 5)
+
+    def test_failures_that_are_not_retried_log_the_error_too(self):
+        cases = [
+            ("live", urllib.error.URLError(reason=ConnectionRefusedError(61, "Connection refused")), True,
+             ws.NetworkError, "ConnectionRefusedError: [Errno 61] Connection refused"),
+            ("fatal", urllib.error.URLError(reason="nodename nor servname provided"), False,
+             ws.NetworkError, "URLError: nodename nor servname provided"),
+            ("tls", urllib.error.URLError(reason=ssl.SSLCertVerificationError(1, "certificate verify failed")),
+             False, ws.TLSError, "SSLCertVerificationError: certificate verify failed"),
+            ("bad url", ValueError("unknown url type: 'htp'"), False,
+             ws.BadUrl, "ValueError: unknown url type: 'htp'"),
+        ]
+        for label, err, live, raised, text in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as out:
+                path = os.path.join(out, "requests.jsonl")
+                client, _ = make_client(FakeTransport().add(lambda u: True, err), log_path=path)
+                with self.assertRaises(raised):
+                    client.get("https://web.archive.org/x", live=live)
+                log = read_requests(out)
+                self.assertEqual([(e["status"], e["bytes"], e["error"]) for e in log], [(0, 0, text)])
+
 
 if __name__ == "__main__":
     unittest.main()
