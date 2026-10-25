@@ -50,7 +50,7 @@ try:
 except ImportError:
     _zstd = None
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 DEFAULT_UA = "wayback-salvage/%s (+https://github.com/andrewluxem/wayback-salvage)" % VERSION
 
 WAYBACK = "https://web.archive.org"

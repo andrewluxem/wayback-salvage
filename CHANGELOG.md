@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-10-24
+
+Fix for a live failure: a refused connection from web.archive.org ended the run with exit 1.
+
+### Added
+
+- A `requests.jsonl` entry for an attempt that got no response (`status` 0) has an `error` key naming the error, such as `ConnectionRefusedError: [Errno 61] Connection refused`, so throttling by refusal shows in the log. Entries with a response are unchanged.
+- Tests: each network error type raised bare and wrapped in `URLError`, the images run stopping with a `rate-limited` row, the `--prefer-live` path, `EAI_NONAME`, and the log entries.
+
+### Changed
+
+- The exit 3 message names the last error with its message instead of the class alone, which for an error wrapped by urllib was `URLError`.
+- The help, README and SKILL.md say "network errors" where they said "resets".
+
+### Fixed
+
+- A CDX request from teardown-pairs got `[Errno 61] Connection refused` from web.archive.org, and the run exited 1 at once. Refused connections and temporary DNS failures (`EAI_AGAIN`) now back off on the 503 schedule like resets, aborts and timeouts, bare or inside `URLError`, and exit 3 (resumable) when retries run out. Other DNS failures and other errors still exit 1, TLS verification failures still exit 4, and `--prefer-live` requests are still never retried.
+
 ## [0.2.1] - 2026-10-24
 
 Fixes from the live recheck of 0.2.0.
