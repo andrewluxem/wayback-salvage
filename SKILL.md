@@ -40,7 +40,7 @@ python3 <skill dir>/scripts/wayback_salvage.py <subcommand> [options]
 | 0 | Done | Summarise (below). |
 | 1 | Usage or unexpected error | Read the message and fix the arguments. Do not fall back to curl. |
 | 2 | Request cap reached (`-n`, default 300); unfinished rows are `skipped-cap` | Tell the user to rerun the same command later; it resumes. Raise `-n` only if the user asks. |
-| 3 | Aborted on sustained 429/503 or an outage at archive.org | Tell the user to rerun the same command later; it resumes. Do not lower `--delay` and do not retry in a loop. |
+| 3 | Aborted on sustained 429/503, network errors or an outage at archive.org | Tell the user to rerun the same command later; it resumes. Do not lower `--delay` and do not retry in a loop. |
 | 4 | TLS certificate verification failed | Relay the printed fix to the user. Never disable verification or switch tools to get around it. |
 | 5 | `verify` found a modified or missing file | Relay the `verify` output. Do not edit the manifest. |
 

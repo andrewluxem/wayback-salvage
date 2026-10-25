@@ -50,7 +50,7 @@ Shared options:
 | `-o/--out DIR` | `./wayback-out` | Output directory; holds the manifest, so reuse it to resume. |
 | `--delay SECONDS` | `6` | Minimum interval between archive.org requests. |
 | `-n/--max-requests N` | `300` | Request cap per run, redirect hops and CSS fetches included. |
-| `--max-retries N` | `4` | Retries per request on 429, 502, 503, 504 and connection resets. |
+| `--max-retries N` | `4` | Retries per request on 429, 502, 503, 504, network errors and outage pages. |
 | `--user-agent STR` | `wayback-salvage/<version> (+https://github.com/andrewluxem/wayback-salvage)` | User-Agent header. |
 | `--cafile PATH` | none | CA bundle to trust instead of the default store. |
 | `--dry-run` | off | CDX queries and the page fetch run; image downloads do not; the manifest gets `planned` rows. |
@@ -95,7 +95,7 @@ Status values:
 | `encoding-mismatch` | Header claims an encoding the body does not decode with; raw bytes kept. |
 | `toolbar-injected` | An `id_` HTML response contains Wayback toolbar markup, so the `id_` was lost (usually through a redirect). |
 | `inline-data` | A `data:` URI on the page; recorded, not saved unless `--save-inline`. |
-| `rate-limited` | Retries ran out on 429, 502, 503, 504, connection resets or archive.org outage responses. |
+| `rate-limited` | Retries ran out on 429, 502, 503, 504, network errors or archive.org outage responses. |
 | `skipped-cap` | Not attempted because `--max-requests` was reached. |
 | `planned` | Written by `--dry-run`. |
 | `error` | Anything else, such as a failed nearest-capture CDX lookup; see `error`. |
@@ -165,9 +165,10 @@ urllib sends no `Accept-Encoding` and decodes nothing, and Wayback replays `id_`
 
 - One rate limiter covers all archive.org hosts (`web.archive.org`, `archive.org`): at least `--delay` seconds (default 6, about 10 requests a minute) between requests, plus 0 to 1 s of random jitter.
 - Redirects are followed by the client, up to 5 hops, and each hop goes through the limiter.
-- On 429, 502, 503, 504 and connection resets: wait `max(Retry-After, 30 * 2**attempt)` seconds plus jitter, capped at 600 s, for up to `--max-retries` (default 4) retries. `Retry-After` is accepted as seconds or an HTTP date.
+- On 429, 502, 503, 504 and network errors: wait `max(Retry-After, 30 * 2**attempt)` seconds plus jitter, capped at 600 s, for up to `--max-retries` (default 4) retries. `Retry-After` is accepted as seconds or an HTTP date.
+- Network errors are refused, reset or aborted connections, timeouts and temporary DNS failures (`EAI_AGAIN`), raised bare or inside urllib's `URLError`. Other DNS failures and other transport errors exit 1, and a TLS verification failure exits 4. `--prefer-live` requests are never retried.
 - After any 429 the steady delay doubles for the rest of the run, capped at 60 s.
-- When retries run out the run stops, flushes the manifest and exits 3.
+- When retries run out the run stops, flushes the manifest and exits 3. The message names the last error, such as `HTTP 503` or `ConnectionRefusedError: [Errno 61] Connection refused`.
 - From archive.org, a response whose `<title>` contains "Temporarily Offline" is handled as a 503 whatever its status code. On a replay (`/web/...`) that holds only when the `Memento-Datetime` header is absent: every real replay carries one, so a replay with it is an archived page that happens to have that title. CDX responses go by the title alone. A 200 CDX body that is not JSON is retried the same way (an empty body still means no captures). Neither becomes `not-archived` or `type-mismatch`, so a rerun after the outage picks the rows up again.
 - `--max-requests` (default 300) counts every HTTP request, redirect hops and `--follow-css` fetches included. At the cap, remaining items get `skipped-cap` and the run exits 2.
 - The availability API is never used; CDX covers it.

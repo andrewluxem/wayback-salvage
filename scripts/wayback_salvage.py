@@ -118,8 +118,8 @@ class CapReached(Exception):
 
 
 class RateLimited(Exception):
-    """Retries exhausted on 429/502/503/504, resets or outage responses
-    (exit 3, resumable)."""
+    """Retries exhausted on 429/502/503/504, network errors or outage
+    responses (exit 3, resumable)."""
 
     def __init__(self, url: str, last: str):
         super().__init__("%s (last: %s)" % (url, last))
@@ -412,6 +412,7 @@ class UrllibTransport:
 
 
 _TRANSIENT = (
+    ConnectionRefusedError,
     ConnectionResetError,
     ConnectionAbortedError,
     BrokenPipeError,
@@ -420,6 +421,13 @@ _TRANSIENT = (
     socket.timeout,
     TimeoutError,
 )
+
+
+def _is_transient(exc) -> bool:
+    if isinstance(exc, _TRANSIENT):
+        return True
+    # EAI_AGAIN is a temporary DNS failure; other lookup errors stay fatal.
+    return isinstance(exc, socket.gaierror) and exc.errno == socket.EAI_AGAIN
 
 
 def classify_error(exc: BaseException) -> str:
@@ -431,9 +439,18 @@ def classify_error(exc: BaseException) -> str:
             return "tls"
         if isinstance(candidate, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(candidate):
             return "tls"
-    if isinstance(reason, _TRANSIENT) or isinstance(exc, _TRANSIENT):
+    if _is_transient(reason) or _is_transient(exc):
         return "transient"
     return "fatal"
+
+
+def error_text(exc: BaseException) -> str:
+    """Name and message of a transport error, of the URLError reason when
+    urllib wrapped one: "ConnectionRefusedError: [Errno 61] Connection refused"."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    name = type(reason if isinstance(reason, BaseException) else exc).__name__
+    text = str(reason)
+    return "%s: %s" % (name, text) if text else name
 
 
 def parse_retry_after(value, now: float):
@@ -529,8 +546,9 @@ class Client:
     def request(self, url: str, live: bool = False, validate=None) -> Response:
         """One request with retries. Live requests are not retried. From
         archive.org, the outage page (see is_outage) counts as a 503
-        whatever its status, and validate(resp) may return another reason
-        to retry like one."""
+        whatever its status, as do the network errors classify_error calls
+        transient, and validate(resp) may return another reason to retry
+        like one."""
         host = (urllib.parse.urlsplit(url).hostname or "").lower()
         limiter = self._limiter_for(host)
         attempt = 0
@@ -554,7 +572,7 @@ class Client:
                 if kind == "fatal" or live:
                     reason = getattr(exc, "reason", None) or exc
                     raise NetworkError("%s: %s" % (url, reason))
-                last = type(exc).__name__
+                last = error_text(exc)
             except ValueError as exc:
                 self._log(started, url, 0, 0, waited, attempt)
                 raise BadUrl("%s: %s" % (url, exc))
@@ -2379,8 +2397,8 @@ exit codes:
   0  done
   1  usage or unexpected error
   2  --max-requests reached (resumable: rerun the same command)
-  3  stopped on sustained 429/503 or an archive.org outage (resumable: rerun
-     later, do not lower --delay)
+  3  stopped on sustained 429/503, network errors or an archive.org outage
+     (resumable: rerun later, do not lower --delay)
   4  TLS verification failed (the message names the fix)
   5  verify found a modified or missing file
 """
@@ -2452,7 +2470,7 @@ def build_parser(stdout, stderr) -> argparse.ArgumentParser:
     g.add_argument("-n", "--max-requests", metavar="N", type=_int_arg(1), default=300,
                    help="stop after N HTTP requests, redirect hops included; exit 2, resumable (default: 300)")
     g.add_argument("--max-retries", metavar="N", type=_int_arg(0), default=4,
-                   help="retries on 429/502/503/504, resets and outage pages before exit 3 (default: 4)")
+                   help="retries on 429/502/503/504, network errors and outage pages before exit 3 (default: 4)")
     g.add_argument("--user-agent", metavar="STR", default=DEFAULT_UA, help="User-Agent header (default: %(default)s)")
     g.add_argument("--cafile", metavar="PATH", help="CA bundle for TLS verification (verification is never disabled)")
     g.add_argument("--dry-run", action="store_true",

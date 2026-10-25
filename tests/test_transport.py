@@ -5,6 +5,7 @@ from __future__ import annotations
 import email.utils
 import io
 import os
+import socket
 import ssl
 import tempfile
 import unittest
@@ -162,6 +163,125 @@ class TestBackoff(unittest.TestCase):
         self.assertEqual(t.count(wb(TS, "https://example.net/i2.png")), 5)  # 1 + 4 retries
         self.assertEqual(t.count(wb(TS, "https://example.net/i3.png")), 0)
         self.assertLessEqual(max(clock.sleeps), 600.0)
+
+
+BACKOFF = [30.0, 60.0, 120.0, 240.0]  # 503 schedule for the default 4 retries
+
+
+def network_errors() -> list:
+    """(label, raised, cause) for each transport error that is retried like
+    a 503, bare and wrapped in URLError the way urllib raises it. cause is
+    the error the messages should name. A fresh instance per call."""
+    causes = [
+        ConnectionRefusedError(61, "Connection refused"),
+        ConnectionResetError(54, "Connection reset by peer"),
+        ConnectionAbortedError(53, "Software caused connection abort"),
+        TimeoutError("timed out"),
+        socket.timeout("timed out"),  # TimeoutError itself on 3.10+, distinct on 3.9
+        socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
+    ]
+    out = []
+    for cause in causes:
+        out.append(("%s bare" % type(cause).__name__, cause, cause))
+    for cause in [type(c)(*c.args) for c in causes]:
+        out.append(("%s wrapped" % type(cause).__name__, urllib.error.URLError(reason=cause), cause))
+    return out
+
+
+def named(cause: BaseException) -> str:
+    return "%s: %s" % (type(cause).__name__, cause)
+
+
+class TestNetworkErrors(unittest.TestCase):
+    """Refused, reset and aborted connections, timeouts and EAI_AGAIN from
+    archive.org back off like a 503 and end in exit 3."""
+
+    URL = wb(TS, "https://e.com/a.png")
+
+    def test_retried_with_503_schedule(self):
+        for label, err, _ in network_errors():
+            with self.subTest(error=label):
+                t = FakeTransport().add(self.URL, err, err, fixture("png_red"))
+                client, clock = make_client(t)
+                self.assertEqual(client.get(self.URL).response.status, 200)
+                self.assertEqual(clock.sleeps, [30.0, 60.0])
+                self.assertEqual(t.count(self.URL), 3)
+
+    def test_sustained_exits_3_naming_the_error(self):
+        for label, err, cause in network_errors():
+            with self.subTest(error=label), tempfile.TemporaryDirectory() as out:
+                t = FakeTransport().add(support.is_cdx, err)
+                clock = FakeClock()
+                code, _, stderr = run_cli(["snapshots", "andrewluxem.com", "-o", out], t, clock)
+                self.assertEqual(code, ws.EXIT_RATE, stderr)
+                self.assertEqual(len(t.calls), 5)  # 1 + 4 retries
+                self.assertEqual(clock.sleeps, BACKOFF)
+                self.assertIn("stopped: archive.org", stderr)
+                self.assertIn(named(cause), stderr)
+
+    def test_image_refused_exits_3_manifest_flushed(self):
+        page = "https://example.net/"
+        img2 = "https://example.net/i2.png"
+        t = FakeTransport()
+        t.add(wb(TS, page), fixture("page_four"))
+        t.add(wb(TS, "https://example.net/i1.png"), fixture("png_red"))
+        t.add(wb(TS, img2), urllib.error.URLError(reason=ConnectionRefusedError(61, "Connection refused")))
+        with tempfile.TemporaryDirectory() as out:
+            code, _, stderr = run_cli(["images", page, "-t", TS, "-o", out], t)
+            self.assertEqual(code, ws.EXIT_RATE, stderr)
+            self.assertIn("ConnectionRefusedError: [Errno 61] Connection refused", stderr)
+            rows = {r["original_url"]: r for r in read_manifest(out)}
+            self.assertEqual(rows[page]["status"], "ok")
+            self.assertEqual(rows["https://example.net/i1.png"]["status"], "ok")
+            self.assertEqual(rows[img2]["status"], "rate-limited")
+            self.assertIn("ConnectionRefusedError: [Errno 61] Connection refused", rows[img2]["error"])
+        self.assertEqual(t.count(wb(TS, img2)), 5)
+        self.assertEqual(t.count(wb(TS, "https://example.net/i3.png")), 0)
+
+    def test_live_requests_are_not_retried(self):
+        live = "https://example.org/a.png"
+        for label, err, cause in network_errors():
+            with self.subTest(error=label):
+                t = FakeTransport().add(live, err)
+                client, clock = make_client(t)
+                with self.assertRaises(ws.NetworkError) as cm:
+                    client.get(live, live=True)
+                self.assertIn(str(cause), str(cm.exception))
+                self.assertEqual(t.count(live), 1)
+                self.assertEqual(clock.sleeps, [])
+
+    def test_prefer_live_refused_falls_back_to_wayback_once(self):
+        page = "https://example.org/"
+        t = FakeTransport()
+        t.add(wb(TS, page), fixture("page_one_img"))
+        t.add(lambda u: not u.startswith(support.WB), ConnectionRefusedError(61, "Connection refused"))
+        t.add(lambda u: u.startswith(wb(TS, "")), fixture("png_red"))
+        with tempfile.TemporaryDirectory() as out:
+            code, _, stderr = run_cli(["images", page, "-t", TS, "--prefer-live", "-o", out, "--quiet"], t)
+            self.assertEqual(code, ws.EXIT_OK, stderr)
+            rows = [r for r in read_manifest(out) if r["kind"] == "image"]
+        self.assertEqual([r["source"] for r in rows], ["wayback"])
+        self.assertEqual(t.count(lambda u: not u.startswith(support.WB)), 1)
+
+    def test_error_text(self):
+        refused = ConnectionRefusedError(61, "Connection refused")
+        self.assertEqual(ws.error_text(refused), "ConnectionRefusedError: [Errno 61] Connection refused")
+        self.assertEqual(ws.error_text(urllib.error.URLError(reason=refused)),
+                         "ConnectionRefusedError: [Errno 61] Connection refused")
+        self.assertEqual(ws.error_text(urllib.error.URLError(reason="unknown url type: htp")),
+                         "URLError: unknown url type: htp")
+        self.assertEqual(ws.error_text(TimeoutError()), "TimeoutError")
+
+    def test_other_dns_failures_stay_fatal(self):
+        for form in ("bare", "wrapped"):
+            cause = socket.gaierror(socket.EAI_NONAME, "nodename nor servname provided, or not known")
+            err = cause if form == "bare" else urllib.error.URLError(reason=cause)
+            with self.subTest(form=form), tempfile.TemporaryDirectory() as out:
+                t = FakeTransport().add(lambda u: True, err)
+                code, _, stderr = run_cli(["snapshots", "andrewluxem.com", "-o", out], t)
+                self.assertEqual(code, ws.EXIT_ERROR, stderr)
+                self.assertIn("nodename nor servname provided", stderr)
+                self.assertEqual(len(t.calls), 1)
 
 
 class TestTls(unittest.TestCase):
