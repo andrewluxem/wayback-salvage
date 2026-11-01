@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/banner.svg" alt="wayback-salvage: Recover archived pages and images from the Wayback Machine. Stdlib-only Python CLI plus agent skill." width="100%"></p>
+<p align="center"><img src="docs/banner.svg" alt="wayback-salvage: Recover archived pages and images from the Wayback Machine. Stdlib-only Python CLI plus agent skill."></p>
 
 # wayback-salvage
 
