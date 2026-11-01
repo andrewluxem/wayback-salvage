@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300" role="img" aria-labelledby="t d">
+<title id="t">wayback-salvage</title>
+<desc id="d">Three panels, all run offline on the repo's synthetic test fixture page_gzip.body. 1, grep -c '&lt;img' on the stored body prints 0, because xxd shows it starts 1f8b, a gzip body; its metadata says Content-Encoding: gzip. 2, wayback_salvage.py page on the same fixture: content_encoding=gzip, raw_bytes=275, decoded_bytes=382, js_rendered=false, content_images=1, found_via.img:src=1. 3, after images saves the page and its image, verify prints rows=2, files_checked=2, files_ok=2, modified=0, missing=0, status.ok=2.</desc>
+<style>
+.serif{font-family:Georgia,"Times New Roman",serif}
+.sans{font-family:-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+.lab{font-size:10px;letter-spacing:1.8px;font-weight:600}
+.cap{font-size:11.5px;fill:#8b9096}
+.hl{fill:none;stroke-width:1.5;opacity:0}
+.h1{animation:h1 12s infinite}
+.h2{animation:h2 12s infinite}
+.h3{animation:h3 12s infinite}
+.r1{animation:r1 12s infinite}
+.r2{animation:r2 12s infinite}
+.r3{animation:r3 12s infinite}
+.r4{animation:r4 12s infinite}
+.rb{animation:rb 12s infinite}
+.rc{animation:rc 12s infinite}
+.rd{animation:rd 12s infinite}
+.re{animation:re 12s infinite}
+.rf{animation:rf 12s infinite}
+.rg{animation:rg 12s infinite}
+.rh{animation:rh 12s infinite}
+.ri{animation:ri 12s infinite}
+.rj{animation:rj 12s infinite}
+.rk{animation:rk 12s infinite}
+.rl{animation:rl 12s infinite}
+.rm{animation:rm 12s infinite}
+.rn{animation:rn 12s infinite}
+.ro{animation:ro 12s infinite}
+@keyframes h1{0%,16.7%{opacity:0}18.7%,42.4%{opacity:1}44.1%,100%{opacity:0}}
+@keyframes h2{0%,16.7%,18.7%,44.1%{opacity:0}45.8%,67.8%{opacity:1}69.5%,100%{opacity:0}}
+@keyframes h3{0%,16.7%,18.7%,69.5%{opacity:0}71.2%,94.9%{opacity:1}96.6%,100%{opacity:0}}
+@keyframes r1{0%,16.7%{opacity:1}18.7%,20.4%{opacity:0}22.1%,100%{opacity:1}}
+@keyframes r2{0%,16.7%{opacity:1}18.7%,27.2%{opacity:0}28.9%,100%{opacity:1}}
+@keyframes r3{0%,16.7%{opacity:1}18.7%,33.9%{opacity:0}35.6%,100%{opacity:1}}
+@keyframes r4{0%,16.7%{opacity:1}18.7%,37.3%{opacity:0}39%,100%{opacity:1}}
+@keyframes rb{0%,16.7%{opacity:1}18.7%,45%{opacity:0}46.6%,100%{opacity:1}}
+@keyframes rc{0%,16.7%{opacity:1}18.7%,47.5%{opacity:0}49.2%,100%{opacity:1}}
+@keyframes rd{0%,16.7%{opacity:1}18.7%,50%{opacity:0}51.7%,100%{opacity:1}}
+@keyframes re{0%,16.7%{opacity:1}18.7%,52.6%{opacity:0}54.3%,100%{opacity:1}}
+@keyframes rf{0%,16.7%{opacity:1}18.7%,55.1%{opacity:0}56.8%,100%{opacity:1}}
+@keyframes rg{0%,16.7%{opacity:1}18.7%,57.7%{opacity:0}59.3%,100%{opacity:1}}
+@keyframes rh{0%,16.7%{opacity:1}18.7%,62.7%{opacity:0}64.4%,100%{opacity:1}}
+@keyframes ri{0%,16.7%{opacity:1}18.7%,71.2%{opacity:0}72.9%,100%{opacity:1}}
+@keyframes rj{0%,16.7%{opacity:1}18.7%,73.7%{opacity:0}75.4%,100%{opacity:1}}
+@keyframes rk{0%,16.7%{opacity:1}18.7%,76.3%{opacity:0}78%,100%{opacity:1}}
+@keyframes rl{0%,16.7%{opacity:1}18.7%,78.8%{opacity:0}80.5%,100%{opacity:1}}
+@keyframes rm{0%,16.7%{opacity:1}18.7%,81.4%{opacity:0}83.1%,100%{opacity:1}}
+@keyframes rn{0%,16.7%{opacity:1}18.7%,83.9%{opacity:0}85.6%,100%{opacity:1}}
+@keyframes ro{0%,16.7%{opacity:1}18.7%,88.1%{opacity:0}89.8%,100%{opacity:1}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+<rect width="900" height="300" fill="#141618"/>
+
+<text x="32" y="50" class="serif" font-size="28" fill="#e4dfd4">wayback-salvage</text>
+<text x="256" y="50" class="sans" font-size="13.5" fill="#a9adb2">Recover archived pages and images from the Wayback Machine.</text>
+
+<g>
+<text x="32" y="88" class="sans lab" fill="#a39bbd">1 · A GZIP CAPTURE</text>
+<rect x="32" y="98" width="262" height="152" rx="3" fill="#17191c" stroke="#2e3237"/>
+<rect class="hl h1" x="32" y="98" width="262" height="152" rx="3" stroke="#a39bbd"/>
+<text x="44" y="115" class="mono" font-size="10" fill="#8b9096">tests/fixtures/page_gzip.body</text>
+<line x1="33" y1="123" x2="293" y2="123" stroke="#2e3237"/>
+<g class="r1"><text x="44" y="143" class="mono" font-size="10" fill="#8b9096">$ grep -c '&lt;img' page_gzip.body</text><text x="44" y="159" class="mono" font-size="11" fill="#c8963e" font-weight="700">0</text></g>
+<g class="r2"><text x="44" y="183" class="mono" font-size="10" fill="#8b9096">$ xxd -l 8 page_gzip.body</text><text x="44" y="199" class="mono" font-size="10" fill="#e4dfd4">00000000: 1f8b 0800 0000 0000</text></g>
+<rect class="r3" x="101" y="189" width="29" height="14" fill="none" stroke="#c8963e" stroke-dasharray="3 2"/>
+<g class="r4"><text x="44" y="225" class="mono" font-size="10" fill="#8b9096">page_gzip.meta.json</text><text x="44" y="240" class="mono" font-size="10" fill="#e4dfd4">"Content-Encoding": "gzip",</text></g>
+<text x="32" y="272" class="sans cap">Stored as gzip, so grep finds no images.</text>
+</g>
+
+<g>
+<text x="314" y="88" class="sans lab" fill="#c8963e">2 · PAGE DECODES IT</text>
+<rect x="314" y="98" width="272" height="152" rx="3" fill="#17191c" stroke="#2e3237"/>
+<rect class="hl h2" x="314" y="98" width="272" height="152" rx="3" stroke="#c8963e"/>
+<text x="326" y="115" class="mono" font-size="10" fill="#8b9096">wayback_salvage.py page, same fixture</text>
+<line x1="315" y1="123" x2="585" y2="123" stroke="#2e3237"/>
+<g class="rb"><text x="326" y="143" class="mono" font-size="10" fill="#e4dfd4">content_encoding=gzip</text></g>
+<g class="rc"><text x="326" y="159" class="mono" font-size="10" fill="#e4dfd4">raw_bytes=275</text></g>
+<g class="rd"><text x="326" y="175" class="mono" font-size="10" fill="#e4dfd4">decoded_bytes=382</text></g>
+<g class="re"><text x="326" y="191" class="mono" font-size="10" fill="#e4dfd4">js_rendered=false</text></g>
+<g class="rf"><text x="326" y="207" class="mono" font-size="10" fill="#e4dfd4">content_images=1</text></g>
+<g class="rg"><text x="326" y="223" class="mono" font-size="10" fill="#e4dfd4">found_via.img:src=1</text></g>
+<rect class="rh" x="322" y="197" width="128" height="30" fill="none" stroke="#93ad8c" stroke-dasharray="3 2"/>
+<text x="314" y="272" class="sans cap">Decodes the body, then lists its images.</text>
+</g>
+
+<g>
+<text x="606" y="88" class="sans lab" fill="#93ad8c">3 · SAVED AND HASHED</text>
+<rect x="606" y="98" width="262" height="152" rx="3" fill="#17191c" stroke="#2e3237"/>
+<rect class="hl h3" x="606" y="98" width="262" height="152" rx="3" stroke="#93ad8c"/>
+<text x="618" y="115" class="mono" font-size="10" fill="#8b9096">wayback_salvage.py verify</text>
+<line x1="607" y1="123" x2="867" y2="123" stroke="#2e3237"/>
+<g class="ri"><text x="618" y="143" class="mono" font-size="10" fill="#e4dfd4">rows=2</text></g>
+<g class="rj"><text x="618" y="159" class="mono" font-size="10" fill="#e4dfd4">files_checked=2</text></g>
+<g class="rk"><text x="618" y="175" class="mono" font-size="10" fill="#e4dfd4">files_ok=2</text></g>
+<g class="rl"><text x="618" y="191" class="mono" font-size="10" fill="#e4dfd4">modified=0</text></g>
+<g class="rm"><text x="618" y="207" class="mono" font-size="10" fill="#e4dfd4">missing=0</text></g>
+<g class="rn"><text x="618" y="223" class="mono" font-size="10" fill="#e4dfd4">status.ok=2</text></g>
+<rect class="ro" x="614" y="165" width="100" height="46" fill="none" stroke="#93ad8c" stroke-dasharray="3 2"/>
+<text x="606" y="272" class="sans" font-size="11.5" fill="#93ad8c">Page and image saved; hashes re-checked.</text>
+</g>
+</svg>

@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.svg" alt="wayback-salvage: Recover archived pages and images from the Wayback Machine. Stdlib-only Python CLI plus agent skill." width="100%"></p>
+
 # wayback-salvage
 
 An agent skill and a stdlib-only Python CLI that recovers archived pages and images from the Internet Archive's Wayback Machine. It lists captures through the CDX API, fetches raw `id_` bodies and decodes them, extracts image URLs from HTML, CSS, meta tags and inline script strings, and downloads them at a pace archive.org tolerates. Every result goes into a resumable CSV manifest with a sha256 per saved file. Plain curl-and-grep recipes find nothing when Wayback replays a gzip body or the page loads its images from JavaScript; this tool handles both cases.
